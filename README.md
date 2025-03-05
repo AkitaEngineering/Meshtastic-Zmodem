@@ -61,6 +61,4 @@ This project is developed and maintained by Akita Engineering. We are dedicated 
 
 Contributions are welcome! Please feel free to submit pull requests or open issues to suggest improvements or report bugs.
 
-## License
 
-This project is licensed under the MIT License.
