@@ -1,4 +1,4 @@
-# Akita Meshtastic-Zmodem Meshtastic ZModem Plugin
+# Akita Meshtastic ZModem Plugin
 
 This project provides a ZModem protocol plugin for Meshtastic, enabling the transfer of binary files over the LoRa mesh network.
 
