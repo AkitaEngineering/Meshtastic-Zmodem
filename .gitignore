@@ -1,0 +1,65 @@
+# Gitignore for Arduino/C++ Projects
+
+# Compiled object files
+*.o
+*.a
+*.so
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug files
+*.dSYM/
+*.suo
+*.pdb
+*.ilk
+*.map
+*.exp
+*.obj
+*.pch
+*.lib
+*.ncb
+
+# Build directories
+build/
+Build/
+BUILD/
+out/
+Out/
+OUT/
+bin/
+Bin/
+BIN/
+*.bin
+*.hex
+
+# IDE-specific files
+.vscode/
+.idea/
+*.iml
+*.sublime-*
+*.DS_Store
+*~
+*.bak
+*.tmp
+
+# PlatformIO specific files
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Arduino IDE sketch backup files
+*.ino~
+
+# Local configuration (if any)
+local_config.h
