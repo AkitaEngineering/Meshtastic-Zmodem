@@ -1,0 +1,50 @@
+; Example PlatformIO Configuration for Akita Meshtastic Zmodem Project
+; Adjust board, framework, and library identifiers as needed.
+
+[platformio]
+default_envs = heltec_wifi_lora_32_v2 ; Change to your default board environment
+
+[env] ; Common settings for all environments
+platform = espressif32
+framework = arduino
+monitor_speed = 115200
+upload_speed = 921600 ; Optional: Faster upload speed
+board_build.filesystem = spiffs ; Define filesystem type (spiffs or littlefs)
+
+lib_deps =
+    ; Meshtastic Core Library (use the correct identifier found in PlatformIO registry)
+    meshtastic/Meshtastic @ ^2.3.9 ; Example: Specify version range if needed
+
+    ; ZModem Library (use the correct identifier)
+    ropg/ZModem
+
+    ; StreamUtils Library (often a dependency for ZModem)
+    bblanchon/ArduinoStreamUtils
+
+    ; Akita Mesh Zmodem Library (if not installing globally)
+    ; Option 1: From Git
+    ; https://github.com/AkitaEngineering/Meshtastic-Zmodem.git
+    ; Option 2: From local path (replace with your path)
+    ; symlink://../Akita_Meshtastic_Zmodem ; Assuming library is one level up
+
+build_flags =
+    ; Example build flags (uncomment or add as needed)
+    ; -D CORE_DEBUG_LEVEL=5       ; Enable verbose debugging for ESP32 core
+    ; -D CONFIG_MESHTASTIC_DEBUG_SERIAL ; Enable Meshtastic specific debug output
+    ; -D AKZ_DEFAULT_ZMODEM_TIMEOUT=45000 ; Override library default via build flag
+
+[env:heltec_wifi_lora_32_v2] ; Specific settings for Heltec WiFi LoRa V2
+board = heltec_wifi_lora_32_v2
+lib_deps =
+    ${env.lib_deps} ; Include common libraries
+    ; Add board-specific libraries if needed (e.g., display drivers)
+    olikraus/U8g2
+
+[env:ttgo_tbeam] ; Specific settings for TTGO T-Beam
+board = ttgo_tbeam
+lib_deps =
+    ${env.lib_deps} ; Include common libraries
+    ; Add board-specific libraries if needed (e.g., AXP power management)
+    ; lewisxhe/AXP202X_Library
+
+; Add other board environments as needed...
