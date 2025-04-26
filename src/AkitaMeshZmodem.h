@@ -4,7 +4,7 @@
  * @brief Main header file for the Akita Meshtastic Zmodem Arduino Library.
  * Provides ZModem file transfer capabilities over Meshtastic networks.
  * @version 1.0.0
- * @date 2025-04-26 // Adjust date as needed
+ * @date 2025-04-26
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
