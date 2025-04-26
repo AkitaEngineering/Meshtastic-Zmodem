@@ -5,7 +5,7 @@
  * Users can override these by defining them before including AkitaMeshZmodem.h,
  * or by using the configuration setter methods.
  * @version 1.0.0
- * @date 2025-04-26 // Adjust date as needed
+ * @date 2025-04-26
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
