@@ -3,8 +3,8 @@
  * @author Akita Engineering
  * @brief Main header file for the Akita Meshtastic Zmodem Arduino Library.
  * Provides ZModem file transfer capabilities over Meshtastic networks.
- * @version 1.0.0
- * @date 2025-04-26
+ * @version 1.1.0
+ * @date 2025-11-17 // Updated date
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
@@ -62,20 +62,30 @@ public:
 
     /**
      * @brief Main processing loop. Must be called repeatedly in the Arduino loop() function.
-     * Handles ZModem protocol state, packet processing, and timeouts.
+     * Handles ZModem protocol state (via ZModem.loop()) and timeouts.
      *
      * @return TransferState The current state of the transfer process.
      */
     TransferState loop();
 
     /**
-     * @brief Initiates sending a file.
+     * @brief Feeds a received Meshtastic data packet into the ZModem stream processor.
+     * This should be called by the user (e.g., in the module's handleReceived) when a packet
+     * arrives on the `AKZ_ZMODEM_DATA_PORTNUM`.
+     *
+     * @param packet The received Meshtastic packet.
+     */
+    void processDataPacket(MeshPacket& packet);
+
+    /**
+     * @brief Initiates sending a file to a specific destination.
      *
      * @param filePath The full path to the file on the specified filesystem.
+     * @param destinationNodeId The Meshtastic NodeNum (e.g., 0x12345678) of the recipient.
      * @return true If the send operation was successfully initiated.
      * @return false If initiation failed (e.g., file not found, transfer already active).
      */
-    bool startSend(const String& filePath);
+    bool startSend(const String& filePath, NodeNum destinationNodeId);
 
     /**
      * @brief Initiates receiving a file.
@@ -119,12 +129,6 @@ public:
     // --- Configuration Setters ---
 
     /**
-     * @brief Sets the maximum number of retries on ZModem errors.
-     * @param retries Maximum retry count.
-     */
-    void setMaxRetries(uint16_t retries);
-
-    /**
      * @brief Sets the timeout for ZModem operations.
      * @param timeoutMs Timeout duration in milliseconds.
      */
@@ -155,13 +159,12 @@ private:
     File _transferFile;                     ///< File handle for the current transfer.
     String _filename = "";                  ///< Filename for the current transfer.
     TransferState _currentState = TransferState::IDLE; ///< Current operational state.
+    NodeNum _destinationNodeId = BROADCAST_ADDR; ///< Destination node for sending.
 
     size_t _totalFileSize = 0;              ///< Total size of the file being transferred.
     size_t _bytesTransferred = 0;           ///< Bytes transferred so far.
-    uint16_t _retryCount = 0;               ///< Current retry attempt count.
 
     // --- Configuration ---
-    uint16_t _maxRetryCount = AKZ_DEFAULT_MAX_RETRY_COUNT; ///< Max ZModem retries on error.
     unsigned long _zmodemTimeout = AKZ_DEFAULT_ZMODEM_TIMEOUT; ///< ZModem operation timeout (ms).
     unsigned long _progressUpdateInterval = AKZ_DEFAULT_PROGRESS_UPDATE_INTERVAL; ///< Progress update interval (ms).
     size_t _maxPacketSize = AKZ_DEFAULT_MAX_PACKET_SIZE; ///< Max Meshtastic payload size.
