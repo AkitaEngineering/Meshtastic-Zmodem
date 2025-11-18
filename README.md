@@ -76,5 +76,3 @@ When integrating into custom code:
 * `begin(mesh, Filesystem, &Serial)`: Initialize the engine and set up the transport streams.
 * `loop()`: Must be called continuously in your main loop to process the ZModem state machine.
 * `processDataPacket(MeshPacket& packet)`: **CRITICAL.** This method is used to push raw data packets received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) directly into the ZModem engine's input buffer.
-
----the same license. Copyright and license notices must be preserved. Contributors provide an express grant of patent rights. See the [LICENSE](LICENSE) file for the full license text.
