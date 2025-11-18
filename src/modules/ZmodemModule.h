@@ -2,8 +2,8 @@
  * @file ZmodemModule.h
  * @author Akita Engineering
  * @brief Meshtastic Module for handling ZModem file transfers using the AkitaMeshZmodem library.
- * @version 1.0.0
- * @date 2025-04-26
+ * @version 1.1.0
+ * @date 2025-11-17 // Updated date
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
@@ -14,12 +14,7 @@
 #include "globals.h"   // Access to global objects like mesh, Filesystem
 #include "module.h"    // Base class for Meshtastic modules
 #include <AkitaMeshZmodem.h> // Include the ZModem library we created
-
-// Define a unique PortNum for ZModem commands and potentially data
-// Choose a number in the application range (PRIVATE_APP_MAX - 255?)
-// Check Meshtastic documentation/source for currently unused PortNums.
-// Using 250 as an example - VERIFY THIS IS NOT IN USE!
-const int PortNum_ZMODEM_APP = 250;
+#include "AkitaMeshZmodemConfig.h" // Include our port definitions
 
 /**
  * @brief A Meshtastic Module to enable ZModem file transfers.
@@ -51,7 +46,7 @@ public:
     virtual bool handleReceived(MeshPacket& packet) override;
 
 private:
-    MeshInterface& mesh; // Reference to the main mesh interface
+    // MeshInterface& mesh; // Already a member of the base Module class
     AkitaMeshZmodem akitaZmodem; // Instance of our ZModem library handler
 
     // Optional: Add methods for handling MQTT, Serial commands if needed later
