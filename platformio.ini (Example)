@@ -16,7 +16,7 @@ lib_deps =
     meshtastic/Meshtastic @ ^2.3.9 ; Example: Specify version range if needed
 
     ; ZModem Library (use the correct identifier)
-    ropg/ZModem
+    jara-mill/ZModem
 
     ; StreamUtils Library (often a dependency for ZModem)
     bblanchon/ArduinoStreamUtils
@@ -32,6 +32,8 @@ build_flags =
     ; -D CORE_DEBUG_LEVEL=5       ; Enable verbose debugging for ESP32 core
     ; -D CONFIG_MESHTASTIC_DEBUG_SERIAL ; Enable Meshtastic specific debug output
     ; -D AKZ_DEFAULT_ZMODEM_TIMEOUT=45000 ; Override library default via build flag
+    ; -D AKZ_ZMODEM_COMMAND_PORTNUM=250 ; Override default command port
+    ; -D AKZ_ZMODEM_DATA_PORTNUM=251   ; Override default data port
 
 [env:heltec_wifi_lora_32_v2] ; Specific settings for Heltec WiFi LoRa V2
 board = heltec_wifi_lora_32_v2
