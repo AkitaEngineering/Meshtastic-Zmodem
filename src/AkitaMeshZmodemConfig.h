@@ -4,8 +4,8 @@
  * @brief Default configuration values for the AkitaMeshZmodem library.
  * Users can override these by defining them before including AkitaMeshZmodem.h,
  * or by using the configuration setter methods.
- * @version 1.0.0
- * @date 2025-04-26
+ * @version 1.1.0
+ * @date 2025-11-17 // Updated date
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
@@ -43,19 +43,12 @@
 #endif
 
 /**
- * @brief Default maximum number of retry attempts when a ZModem error occurs during transfer.
- */
-#ifndef AKZ_DEFAULT_MAX_RETRY_COUNT
-#define AKZ_DEFAULT_MAX_RETRY_COUNT 3
-#endif
-
-/**
  * @brief The byte value used to identify packets belonging to this ZModem stream.
  * This helps differentiate ZModem data from other Meshtastic traffic.
  * Ensure this doesn't conflict with other protocols on the network.
  */
 #ifndef AKZ_PACKET_IDENTIFIER
-#define AKZ_PACKET_IDENTIFIER 0xFF // Example identifier (255)
+#define AKZ_PACKET_IDENTIFIER 0xAF // Changed from 0xFF to avoid potential conflicts
 #endif
 
 /**
@@ -72,6 +65,24 @@
  */
 #ifndef AKZ_STREAM_TX_BUFFER_SIZE
 #define AKZ_STREAM_TX_BUFFER_SIZE 256 // Slightly larger than max packet size
+#endif
+
+// --- PortNum Definitions ---
+
+/**
+ * @brief The PortNum used for sending/receiving ZModem commands (e.g., "SEND", "RECV").
+ * Must be an unused PortNum in the Meshtastic application range.
+ */
+#ifndef AKZ_ZMODEM_COMMAND_PORTNUM
+#define AKZ_ZMODEM_COMMAND_PORTNUM 250
+#endif
+
+/**
+ * @brief The PortNum used for the actual ZModem protocol data packets.
+ * Must be an unused PortNum in the Meshtastic application range and different from the command port.
+ */
+#ifndef AKZ_ZMODEM_DATA_PORTNUM
+#define AKZ_ZMODEM_DATA_PORTNUM 251
 #endif
 
 
