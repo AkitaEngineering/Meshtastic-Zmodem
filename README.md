@@ -20,8 +20,7 @@ Developed and maintained by [Akita Engineering](https://akitaengineering.com).
 * **Meshtastic Integration:** Wraps Meshtastic packet communication within a standard Arduino `Stream` interface for seamless integration with the ZModem library.
 * **Packet Handling:** Implements packetization, sequence tracking (Packet ID), and reassembly to handle Meshtastic's packet size limitations.
 * **Filesystem Agnostic:** Uses the standard Arduino `FS` API, allowing integration with SPIFFS, SD cards, or other compatible filesystems.
-* **Simple Control (Module):** The included Meshtastic module allows transfers to be initiated via simple text commands sent over Meshtastic.
-* **Flexible Control (Library):** The library can be integrated into custom sketches with user-defined control mechanisms.
+* **Simple Control:** Transfers can be initiated via simple text commands sent over Meshtastic (customizable in user code).
 * **Robust Error Handling:** Includes timeouts and configurable retries for ZModem operations.
 * **Progress Tracking:** Provides feedback on transfer progress (bytes transferred, percentage if file size is known) via an optional debug stream (e.g., `Serial`).
 * **Configurable:** Allows customization of timeouts, packet sizes, retry counts, and progress update intervals.
@@ -29,12 +28,12 @@ Developed and maintained by [Akita Engineering](https://akitaengineering.com).
 ## Requirements
 
 * **Hardware:** Meshtastic-compatible devices (ESP32-based recommended due to filesystem and memory requirements).
-* **Development Environment:**
+* **Arduino IDE or PlatformIO:**
     * Arduino IDE with ESP32 board support installed.
-    * OR PlatformIO IDE (recommended for easier dependency management, especially for module integration).
-* **Required Arduino Libraries:**
-    * `Meshtastic` (The official Meshtastic device library/firmware source)
-    * `ZModem` (A compatible ZModem Arduino library, e.g., [ropg/ZModem](https://github.com/ropg/ZModem))
+    * PlatformIO IDE (recommended for easier dependency management).
+ * **Required Arduino Libraries:**
+    * `Meshtastic` (The official Meshtastic device library)
+    * `ZModem` (A compatible ZModem Arduino library, e.g., [jara-mill/ZModem](https://github.com/jara-mill/ZModem))
     * `StreamUtils` (Required by some ZModem libraries, e.g., [bblanchon/ArduinoStreamUtils](https://github.com/bblanchon/ArduinoStreamUtils))
     * `FS` (Part of the ESP32 core)
 
