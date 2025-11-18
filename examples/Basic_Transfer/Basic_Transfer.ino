@@ -3,26 +3,22 @@
  * @author Akita Engineering
  * @brief Example sketch demonstrating basic file transfer using the AkitaMeshZmodem library.
  * Initiates transfers based on commands received via Meshtastic text messages.
- * @version 1.0.0
- * @date 2025-04-26
+ * @version 1.1.0
+ * @date 2025-11-17 // Updated date
  *
  * @copyright Copyright (c) 2025 Akita Engineering
  *
  */
 
-#include <Meshtastic.h> // Main Meshtastic library header
-#include <SPIFFS.h>     // Using SPIFFS for file storage in this example
+#include <Meshtastic.h>      // Main Meshtastic library header
+#include <SPIFFS.h>          // Using SPIFFS for file storage in this example
 #include "AkitaMeshZmodem.h" // Include the library header
+#include "AkitaMeshZmodemConfig.h" // Include our port definitions
 
 // --- Meshtastic Instance ---
 // Assuming 'mesh' is the standard global instance provided by the Meshtastic firmware/environment.
 // If running truly standalone, you might need:
-// Meshtastic mesh;
-// RadioInterface radio(config); // Setup radio interface
-// Queue queue;
-// NodeDB db;
-// Power power;
-// MeshInterface mesh(NULL, &radio, &queue, &db, &power);
+// Meshtastic mesh; // And full initialization...
 
 
 // --- Akita ZModem Instance ---
@@ -35,6 +31,7 @@ const char* TEST_FILENAME_BIN = "/test_image.bin"; // Example binary file
 // --- Function Prototypes ---
 void onMeshtasticReceived(ReceivedPacket& packet); // Callback for Meshtastic packets
 void createTestFiles(); // Helper to create files for sending
+NodeNum parseNodeId(const char* str); // Helper to parse Node ID
 
 // --- Setup ---
 void setup() {
@@ -57,10 +54,7 @@ void setup() {
     Serial.println("Meshtastic initialized (assumed).");
 
     // --- Set Meshtastic Packet Handler ---
-    // Use the appropriate method from your Meshtastic setup to register the callback
-    // Example: mesh.addOnReceiveCallback(&onMeshtasticReceived);
-    // Or if using a different structure: mesh.radio.onReceive = &onMeshtasticReceived; // Check actual API
-    // For now, we'll poll in loop(), but a callback is better.
+    // Using polling in loop() for this example.
     Serial.println("Packet handling will be done via polling in loop().");
 
 
@@ -69,25 +63,21 @@ void setup() {
     akitaZmodem.begin(mesh, SPIFFS, &Serial);
     Serial.println("AkitaMeshZmodem library initialized.");
 
-    // --- Optional: Configure ZModem settings ---
-    // akitaZmodem.setTimeout(45000); // Increase timeout to 45 seconds
-    // akitaZmodem.setMaxRetries(5);   // Increase retries
-    // akitaZmodem.setProgressUpdateInterval(2000); // Update progress every 2 seconds
-
     // --- Create Test Files (Optional) ---
     createTestFiles();
 
     Serial.println("\n--- Setup Complete ---");
-    Serial.println("Waiting for commands via Meshtastic text messages:");
-    Serial.println("  SEND:/<filename>  (e.g., SEND:/test_transfer.txt)");
-    Serial.println("  RECV:/<filename>  (e.g., RECV:/received_file.txt)");
+    Serial.println("Listening for commands on Text Message Port (e.g., 4403)");
+    Serial.println("Listening for data on ZModem Data Port (" + String(AKZ_ZMODEM_DATA_PORTNUM) + ")");
+    Serial.println("\n--- Commands (send via Meshtastic text message) ---");
+    Serial.println("  SEND:!NodeID:/<filename>  (e.g., SEND:!a1b2c3d4:/test_transfer.txt)");
+    Serial.println("  RECV:/<filename>          (e.g., RECV:/received_file.txt)");
     Serial.println("----------------------------------------------------");
 }
 
 // --- Loop ---
 void loop() {
     // --- Handle Incoming Meshtastic Packets (Polling Method) ---
-    // It's generally better to use the Meshtastic onReceive callback if possible.
     if (mesh.available()) {
         ReceivedPacket packet = mesh.receive();
         onMeshtasticReceived(packet); // Process the packet using our handler
@@ -95,8 +85,6 @@ void loop() {
     }
 
     // --- Update the Akita ZModem State Machine ---
-    // This MUST be called frequently to handle the ZModem protocol timings,
-    // process buffered data, and manage timeouts.
     AkitaMeshZmodem::TransferState currentState = akitaZmodem.loop();
 
     // --- Optional: Provide feedback based on state changes ---
@@ -105,10 +93,9 @@ void loop() {
     if (currentState != lastReportedState) {
         switch (currentState) {
             case AkitaMeshZmodem::TransferState::IDLE:
-                // Only report if we were previously busy
-                if (lastReportedState != AkitaMeshZmodem::TransferState::COMPLETE && lastReportedState != AkitaMeshZmodem::TransferState::ERROR) {
+                 if (lastReportedState != AkitaMeshZmodem::TransferState::IDLE) {
                      Serial.println("[ZModem Status: IDLE]");
-                }
+                 }
                 break;
             case AkitaMeshZmodem::TransferState::SENDING:
                 Serial.println("[ZModem Status: SENDING]");
@@ -117,51 +104,40 @@ void loop() {
                 Serial.println("[ZModem Status: RECEIVING]");
                 break;
             case AkitaMeshZmodem::TransferState::COMPLETE:
-                // Final message printed by the library's internal logging
                 Serial.println("[ZModem Status: COMPLETE]");
                 break;
             case AkitaMeshZmodem::TransferState::ERROR:
-                 // Final message printed by the library's internal logging
                 Serial.println("[ZModem Status: ERROR]");
                 break;
         }
         lastReportedState = currentState; // Update last reported state
     }
 
-    // Add a small delay to prevent busy-waiting and allow other tasks
     delay(20);
 }
 
 // --- Meshtastic Packet Handler ---
 void onMeshtasticReceived(ReceivedPacket& packet) {
-    // Check if it's a text message potentially containing a command
+    
+    // 1. Check for COMMANDS (on the standard text message port for this example)
     if (packet.isValid && packet.decoded.portnum == PortNum_TEXT_MESSAGE_APP && packet.decoded.payload.length() > 0) {
 
         String msg = packet.decoded.payload.toString();
         Serial.print("\nReceived Meshtastic Text: '"); Serial.print(msg); Serial.println("'");
         Serial.print("From Node: 0x"); Serial.println(packet.from, HEX);
 
-        // Commands are case-sensitive: SEND:/<filepath> or RECV:/<filepath>
-
         String command;
-        String filename;
+        String args;
 
         if (msg.startsWith("SEND:")) {
             command = "SEND";
-            filename = msg.substring(5);
+            args = msg.substring(5); // e.g., "!a1b2c3d4:/path/file.txt"
         } else if (msg.startsWith("RECV:")) {
             command = "RECV";
-            filename = msg.substring(5);
+            args = msg.substring(5); // e.g., "/path/file.txt"
         } else {
-            // Not a ZModem command, just print it
             Serial.println("(Not a ZModem command)");
             return; // Ignore
-        }
-
-        // Validate filename format (must start with '/')
-        if (filename.length() == 0 || !filename.startsWith("/")) {
-            Serial.println("Invalid command format: Filename must be an absolute path (start with '/').");
-            return;
         }
 
         // Check if a transfer is already active
@@ -170,29 +146,64 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
             Serial.print("Current state: "); Serial.println((int)akitaZmodem.getCurrentState());
             return;
         }
-
-        // Execute the command
-        if (command == "SEND") {
-            Serial.println("Initiating SEND for file: " + filename);
-            if (!akitaZmodem.startSend(filename)) {
-                Serial.println("-> Failed to initiate send operation.");
-            } else {
-                 Serial.println("-> Send operation started successfully.");
+        
+        // --- Handle RECV Command ---
+        if (command == "RECV") {
+            String filename = args;
+            if (filename.length() == 0 || !filename.startsWith("/")) {
+                Serial.println("Invalid RECV format: Filename must be an absolute path (start with '/').");
+                return;
             }
-        } else if (command == "RECV") {
+
             Serial.println("Initiating RECEIVE to file: " + filename);
-             if (!akitaZmodem.startReceive(filename)) {
+            if (!akitaZmodem.startReceive(filename)) {
                 Serial.println("-> Failed to initiate receive operation.");
             } else {
                  Serial.println("-> Receive operation started. Waiting for sender...");
             }
+        
+        // --- Handle SEND Command ---
+        } else if (command == "SEND") {
+            // Format: SEND:!NodeID:/path/file.txt
+            int idEnd = args.indexOf(':');
+            if (idEnd <= 0) {
+                Serial.println("Invalid SEND format. Use SEND:!NodeID:/path/file.txt");
+                return;
+            }
+
+            String nodeIdStr = args.substring(0, idEnd); // e.g., "!a1b2c3d4"
+            String filename = args.substring(idEnd + 1); // e.g., "/path/file.txt"
+
+            if (filename.length() == 0 || !filename.startsWith("/")) {
+                Serial.println("Invalid SEND format: Filename must be an absolute path (start with '/').");
+                return;
+            }
+
+            // Parse NodeID
+            NodeNum destNodeId = parseNodeId(nodeIdStr.c_str());
+            if (destNodeId == 0 || destNodeId == BROADCAST_ADDR) {
+                Serial.println("Invalid SEND format: Invalid destination NodeID: " + nodeIdStr);
+                return;
+            }
+
+            Serial.println("Initiating SEND for file: " + filename + " to Node 0x" + String(destNodeId, HEX));
+            if (!akitaZmodem.startSend(filename, destNodeId)) {
+                Serial.println("-> Failed to initiate send operation.");
+            } else {
+                 Serial.println("-> Send operation started successfully.");
+            }
         }
 
-    } else if (packet.isValid && packet.decoded.portnum == PortNum_APP_MAX) {
-        // Potentially a ZModem data packet (check identifier if needed)
-        // The library's internal stream handler deals with these via mesh.available() / mesh.receive()
-        // So, we don't strictly need to handle them here if polling in loop()
-         // Serial.print("."); // Indicate some packet activity
+    // 2. Check for DATA (on the dedicated data port)
+    } else if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {
+        
+        // This is a data packet, feed it to the library
+        if (akitaZmodem.getCurrentState() == AkitaMeshZmodem::TransferState::RECEIVING) {
+            Serial.print("."); // Indicate data packet received
+            akitaZmodem.processDataPacket(packet);
+        } else {
+            // Not expecting data, ignore it
+        }
     }
     // Ignore other packet types
 }
@@ -200,7 +211,7 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
 // --- Helper Function to Create Test Files ---
 void createTestFiles() {
     Serial.println("Creating test files on SPIFFS...");
-
+    // ... (rest of the function is unchanged, omitted for brevity) ...
     // --- Text File ---
     Serial.print("Creating "); Serial.print(TEST_FILENAME_TXT); Serial.print("... ");
     File fileTxt = SPIFFS.open(TEST_FILENAME_TXT, FILE_WRITE);
@@ -236,4 +247,28 @@ void createTestFiles() {
         Serial.print("OK ("); Serial.print(fileSize); Serial.println(" bytes).");
     }
      Serial.println("Test file creation finished.");
+}
+
+
+/**
+ * @brief Parses a node ID string (like "!1234abcd" or "1234abcd") into a NodeNum.
+ * This is a simplified helper; the main firmware has a more robust one.
+ * @param str The string to parse.
+ * @return NodeNum The parsed ID, or 0 on error.
+ */
+NodeNum parseNodeId(const char* str) {
+    if (!str || str[0] == '\0') return 0;
+    const char* idStr = str;
+    if (str[0] == '!') {
+        idStr = str + 1; // Skip the '!'
+    }
+    if (strlen(idStr) > 8) return 0; // Max 8 hex digits for 32-bit ID
+
+    char* endptr;
+    unsigned long nodeId = strtoul(idStr, &endptr, 16);
+    
+    if (*endptr != '\0' || nodeId == 0) { // Check for invalid chars or zero ID
+        return 0;
+    }
+    return (NodeNum)nodeId;
 }
