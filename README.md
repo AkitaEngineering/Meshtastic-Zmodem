@@ -1,145 +1,80 @@
 # Akita Meshtastic ZModem Library & Module
 
-**Version: 1.0.0**
+**Version: 1.1.0**
 
 This project provides ZModem file transfer capabilities for [Meshtastic](https://meshtastic.org/) LoRa mesh networks. It includes:
 
 1.  An **Arduino Library (`AkitaMeshZmodem`)**: Allows direct integration into custom Meshtastic Arduino sketches.
 2.  A **Meshtastic Module (`ZmodemModule`)**: Can be compiled into the main Meshtastic firmware to provide file transfer functionality controlled via mesh commands.
 
-This enables reliable sending and receiving of binary files directly between Meshtastic nodes, typically using the device's onboard filesystem (like SPIFFS on ESP32).
+This enables **reliable, targeted (node-to-node) binary file transfers** using a custom, **non-blocking** ZModem protocol engine built directly into the library, guaranteeing stability and zero external dependency issues.
 
 Developed and maintained by [Akita Engineering](https://akitaengineering.com).
 
-**License:** This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. See the [LICENSE](LICENSE) file for details.
+**License:** This project is licensed under the **GNU General Public License v3.0 (GPLv3)**.
 
 ## Features
 
-* **Binary File Transfer:** Send and receive any type of file (text, images, firmware updates, etc.) over the Meshtastic mesh.
-* **Reliable ZModem Protocol:** Utilizes the robust ZModem protocol, which includes error checking (CRC) and recovery mechanisms suitable for potentially lossy LoRa links.
-* **Meshtastic Integration:** Wraps Meshtastic packet communication within a standard Arduino `Stream` interface for seamless integration with the ZModem library.
-* **Packet Handling:** Implements packetization, sequence tracking (Packet ID), and reassembly to handle Meshtastic's packet size limitations.
-* **Filesystem Agnostic:** Uses the standard Arduino `FS` API, allowing integration with SPIFFS, SD cards, or other compatible filesystems.
-* **Simple Control:** Transfers can be initiated via simple text commands sent over Meshtastic (customizable in user code).
-* **Robust Error Handling:** Includes timeouts and configurable retries for ZModem operations.
-* **Progress Tracking:** Provides feedback on transfer progress (bytes transferred, percentage if file size is known) via an optional debug stream (e.g., `Serial`).
-* **Configurable:** Allows customization of timeouts, packet sizes, retry counts, and progress update intervals.
+* **Zero External Dependencies:** The **ZModem protocol stack is entirely built-in** (`src/utility/ZModemEngine`), eliminating reliance on external, unstable, or missing ZModem libraries.
+* **Non-Blocking Operation:** The implementation is designed to run seamlessly within the main Meshtastic firmware loop, ensuring the device remains responsive, routing packets, and managing the mesh network during transfers.
+* **Targeted Sending:** Files are sent directly to a specified Node ID, **not broadcast** across the entire mesh, which is efficient and network-friendly.
+* **Reliable Protocol:** Utilizes simplified ZModem state handling and CRC checks optimized for robust, 8-bit clean LoRa links.
+* **Dedicated Port Handling:** Uses separate, configurable Meshtastic PortNums for command initiation and data transmission to prevent conflicts.
+* **Filesystem Agnostic:** Uses the standard Arduino `FS` API for compatibility with SPIFFS, LittleFS, or SD cards.
 
 ## Requirements
 
-* **Hardware:** Meshtastic-compatible devices (ESP32-based recommended due to filesystem and memory requirements).
-* **Arduino IDE or PlatformIO:**
-    * Arduino IDE with ESP32 board support installed.
-    * PlatformIO IDE (recommended for easier dependency management).
- * **Required Arduino Libraries:**
-    * `Meshtastic` (The official Meshtastic device library)
-    * `ZModem` (A compatible ZModem Arduino library, e.g., [jara-mill/ZModem](https://github.com/jara-mill/ZModem))
-    * `StreamUtils` (Required by some ZModem libraries, e.g., [bblanchon/ArduinoStreamUtils](https://github.com/bblanchon/ArduinoStreamUtils))
+* **Hardware:** Meshtastic-compatible devices (**ESP32-based recommended**) with sufficient flash memory for the firmware and a filesystem (SPIFFS/LittleFS) to store files.
+* **Required Arduino Libraries (Minimal):**
+    * `Meshtastic` (Official Meshtastic device library/firmware source)
+    * `StreamUtils` (A common utility library, included in PlatformIO/Arduino)
     * `FS` (Part of the ESP32 core)
 
 ## Installation
 
-You can use this project in two ways: as a standalone library in your own sketches, or by compiling the module into the main Meshtastic firmware.
-
 ### Option 1: Using the Library in a Custom Sketch
 
-1.  **Install Dependencies:**
-    * **Arduino IDE:** Open the Library Manager (`Sketch` -> `Include Library` -> `Manage Libraries...`). Search for and install `Meshtastic`, `ZModem` (e.g., by ropg), and `StreamUtils`.
-    * **PlatformIO:** Add the following to your `platformio.ini` file under `lib_deps`:
-        ```ini
-        lib_deps =
-            meshtastic/Meshtastic     ; Or the correct identifier
-            ropg/ZModem               ; Or the correct identifier
-            bblanchon/ArduinoStreamUtils
-        ```
-
+1.  **Install Dependencies:** Ensure `Meshtastic` and `StreamUtils` are installed via the Arduino Library Manager or PlatformIO.
 2.  **Install AkitaMeshZmodem Library:**
-    * **Option A: Install from ZIP:** Download this repository as a ZIP file (`Code` -> `Download ZIP`). In the Arduino IDE, go to `Sketch` -> `Include Library` -> `Add .ZIP Library...` and select the downloaded file.
-    * **Option B: Manual Installation (Arduino IDE):** Clone or download this repository. Place the entire `AkitaEngineering-Meshtastic-Zmodem-main` (or similar) folder into your Arduino `libraries` directory (usually found in `Documents/Arduino/libraries`). Rename the folder to `Akita_Meshtastic_Zmodem`.
-    * **Option C: PlatformIO:** Add the library via its Git URL or path in your `platformio.ini`:
+    * **PlatformIO (Recommended):** Add the library directly to your `platformio.ini` dependencies:
         ```ini
         lib_deps =
-            ; ... other dependencies
-            [https://github.com/AkitaEngineering/Meshtastic-Zmodem.git](https://github.com/AkitaEngineering/Meshtastic-Zmodem.git) ; Or path to local clone
+            meshtastic/Meshtastic
+            bblanchon/ArduinoStreamUtils
+            https://github.com/AkitaEngineering/Meshtastic-Zmodem.git
         ```
-
-3.  **Restart IDE:** Restart your Arduino IDE or PlatformIO environment.
-4.  **Include and Use:** `#include "AkitaMeshZmodem.h"` in your sketch and use the `AkitaMeshZmodem` class as shown in the `examples/` directory.
+    * **Arduino IDE:** Download this repository as a ZIP and install it via the Arduino IDE's `Sketch` -> `Include Library` -> `Add .ZIP Library...` option.
 
 ### Option 2: Integrating the Module into Meshtastic Firmware
 
-This requires building the Meshtastic firmware from source using PlatformIO.
+This is the preferred method for running file transfers as a service and requires building the Meshtastic firmware from source using PlatformIO.
 
-1.  **Clone Meshtastic Firmware:** Clone the official [Meshtastic device firmware repository](https://github.com/meshtastic/firmware).
-2.  **Clone/Copy This Repository:** Clone or download this `AkitaEngineering/Meshtastic-Zmodem` repository.
-3.  **Install Library:**
-    * Copy the `src/` directory from *this* repository and rename it to `Akita_Meshtastic_Zmodem`. Place this `Akita_Meshtastic_Zmodem` folder inside the `lib/` directory of the *Meshtastic firmware* source tree.
-    * Alternatively, add this repository as a dependency in the main Meshtastic `platformio.ini` file (under `lib_deps`).
-4.  **Install Module:**
-    * Copy the `src/modules/ZmodemModule.h` and `src/modules/ZmodemModule.cpp` files from *this* repository into the `src/modules/` directory within the *Meshtastic firmware* source tree.
-5.  **Register Module:**
-    * Edit `src/mesh-core.cpp` (or a similar central file like `MeshService.cpp` depending on firmware version) in the Meshtastic firmware source.
-    * Add the include near the top: `#include "modules/ZmodemModule.h"`
-    * Find where other modules are instantiated (e.g., in `MeshService::setupModules()` or similar).
-    * Add the line to create an instance of the Zmodem module:
-        ```cpp
-        modules.push_back(new ZmodemModule(*this)); // 'this' usually refers to the MeshInterface instance
-        ```
-6.  **Verify PortNum:** Check that `PortNum_ZMODEM_APP` (defined in `ZmodemModule.h`, default is 250) does not conflict with other PortNums used in the Meshtastic firmware (see `mesh/mesh.options.proto` or `PortNum.h`). Change it if necessary.
-7.  **Build and Flash:** Build the modified Meshtastic firmware using PlatformIO and flash it to your device(s).
+1.  **Prepare Files:** Copy the files from the `src/` directory into a library folder (`lib/Akita_Meshtastic_Zmodem`) within the Meshtastic firmware source tree.
+2.  **Install Module:** Copy `src/modules/ZmodemModule.h` and `src/modules/ZmodemModule.cpp` into the Meshtastic firmware's `src/modules/` directory.
+3.  **Register Module:** Edit the main firmware file (`src/mesh-core.cpp` or similar) to include the module header and instantiate the module, allowing it to hook into the main loop:
+    ```cpp
+    #include "modules/ZmodemModule.h"
+    // ...
+    modules.push_back(new ZmodemModule(*this));
+    ```
 
 ## Usage
 
-### Library Usage (Custom Sketch)
+Control is handled by sending specific text commands to the device on the **Command Port** (`AKZ_ZMODEM_COMMAND_PORTNUM`, default 250).
 
-Refer to the `examples/Basic_Transfer/Basic_Transfer.ino` sketch. The basic steps are:
+### Command Structure
 
-1.  Include the header: `#include "AkitaMeshZmodem.h"`
-2.  Create an instance: `AkitaMeshZmodem akitaZmodem;`
-3.  Initialize in `setup()`: `akitaZmodem.begin(mesh, Filesystem, &Serial);` (passing mesh instance, filesystem, and optional debug stream).
-4.  Call `loop()` repeatedly: `akitaZmodem.loop();`
-5.  Trigger transfers based on your logic (e.g., serial commands, button presses, incoming packets):
-    * `akitaZmodem.startSend("/path/to/local/file.dat");`
-    * `akitaZmodem.startReceive("/path/to/save/received_file.dat");`
-6.  Check the state: `akitaZmodem.getCurrentState()`
+| Action | Format | Example (using CLI) |
+| :--- | :--- | :--- |
+| **Start Send** | `SEND:!NodeID:/local/file.bin` | `meshtastic --sendtext "SEND:!a1b2c3d4:/test.txt" --portnum 250` |
+| **Start Receive**| `RECV:/save/path.bin` | `meshtastic --sendtext "RECV:/received.bin" --portnum 250` |
 
-### Module Usage (Integrated into Firmware)
+### API Reference (Library Integration)
 
-Once the module is compiled into the firmware:
+When integrating into custom code:
 
-1.  **Initiate Send:** On the sending device, send a Meshtastic text message to the network (or directly to the receiving node) using the defined command PortNum (`PortNum_ZMODEM_APP`, e.g., 250):
-    * **Command:** `SEND:/path/to/file_on_sender.bin`
-    * Example using Meshtastic Python CLI: `meshtastic --dest !<receiver_node_id> --sendtext "SEND:/my_firmware.bin" --portnum 250`
-    * Example using Android App: Send a direct message to the receiver node with the text `SEND:/my_firmware.bin` and set the PortNum to 250 (if the app allows setting PortNum).
-2.  **Initiate Receive:** On the receiving device, send a Meshtastic text message using the same PortNum:
-    * **Command:** `RECV:/path/to/save_location.bin`
-    * Example: `meshtastic --dest !<sender_node_id> --sendtext "RECV:/received_fw.bin" --portnum 250`
-3.  **Monitor:** Observe the device logs (Serial output if connected) for status messages, progress, and completion/error reports generated by the module and library. The module also sends back simple text replies ("OK: Starting...", "Error: ...") to the command sender on the same PortNum.
+* `begin(mesh, Filesystem, &Serial)`: Initialize the engine and set up the transport streams.
+* `loop()`: Must be called continuously in your main loop to process the ZModem state machine.
+* `processDataPacket(MeshPacket& packet)`: **CRITICAL.** This method is used to push raw data packets received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) directly into the ZModem engine's input buffer.
 
-## Configuration
-
-Default configuration values are defined in `src/AkitaMeshZmodemConfig.h` within the library source. When using the library directly or the module, you can override these by:
-
-1.  **Using `#define` before including the library header** (if using the library directly in a sketch).
-2.  **Using the setter methods** (`setTimeout`, `setMaxPacketSize`, etc.) on the `AkitaMeshZmodem` instance after calling `begin()`. This works for both library and module usage (modify `ZmodemModule.cpp` to call setters in its `setup()` if needed).
-
-**Key Configuration Options:**
-
-* `AKZ_DEFAULT_ZMODEM_TIMEOUT`: Timeout for ZModem operations (ms). Default: 30000.
-* `AKZ_DEFAULT_MAX_PACKET_SIZE`: Max Meshtastic payload size used. Default: 230. (Ensure this doesn't exceed radio limits minus 3 bytes for header).
-* `AKZ_DEFAULT_PROGRESS_UPDATE_INTERVAL`: How often progress is logged (ms). Default: 5000. (0 disables).
-* `AKZ_PACKET_IDENTIFIER`: Byte used to mark ZModem data packets. Default: 0xFF.
-
-## How it Works
-
-The core `AkitaMeshZmodem` library wraps a standard ZModem implementation. It uses a custom `MeshtasticZModemStream` class that acts as the communication channel. This stream class intercepts ZModem protocol data, packetizes it with a sequence header, sends/receives it via the standard Meshtastic API, and handles reassembly and duplicate detection before passing valid data back to the ZModem engine. The `ZmodemModule` acts as a high-level interface within the Meshtastic firmware, handling command parsing and invoking the library functions.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues on the [GitHub repository](https://github.com/AkitaEngineering/Meshtastic-Zmodem) to suggest improvements, report bugs, or add features.
-
-## License
-
-This project is licensed under the **GNU General Public License v3.0 (GPLv3)**.
-
-Permissions of this strong copyleft license are conditioned on making available complete source code of licensed works and modifications, which include larger works using a licensed work, under the same license. Copyright and license notices must be preserved. Contributors provide an express grant of patent rights. See the [LICENSE](LICENSE) file for the full license text.
+---the same license. Copyright and license notices must be preserved. Contributors provide an express grant of patent rights. See the [LICENSE](LICENSE) file for the full license text.
