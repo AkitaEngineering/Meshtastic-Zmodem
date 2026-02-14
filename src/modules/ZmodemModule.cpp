@@ -13,7 +13,7 @@
 #include "AkitaMeshZmodemConfig.h" // Include our port definitions
 #include "mesh-core.h" // Access to Mesh Core functionalities if needed
 #include "serial-interface.h" // For logging via LOG_INFO/LOG_ERROR etc.
-#include "utilities.h" // For parseNodeId
+// #include "utilities.h" // For parseNodeId - not available, define locally
 
 // --- Module Initialization ---
 
@@ -219,4 +219,27 @@ void ZmodemModule::sendReply(const String& message, NodeNum destinationNodeId) {
     if (!mesh.sendPacket(&replyPacket)) {
         LOG_ERROR("Failed to send reply message to 0x%x", destinationNodeId);
     }
+}
+
+/**
+ * @brief Parses a node ID string (like "!1234abcd" or "1234abcd") into a NodeNum.
+ * This is a simplified helper; the main firmware has a more robust one.
+ * @param str The string to parse.
+ * @return NodeNum The parsed ID, or 0 on error.
+ */
+NodeNum parseNodeId(const char* str) {
+    if (!str || str[0] == '\0') return 0;
+    const char* idStr = str;
+    if (str[0] == '!') {
+        idStr = str + 1; // Skip the '!'
+    }
+    if (strlen(idStr) > 8) return 0; // Max 8 hex digits for 32-bit ID
+
+    char* endptr;
+    unsigned long nodeId = strtoul(idStr, &endptr, 16);
+    
+    if (*endptr != '\0' || nodeId == 0) { // Check for invalid chars or zero ID
+        return 0;
+    }
+    return (NodeNum)nodeId;
 }

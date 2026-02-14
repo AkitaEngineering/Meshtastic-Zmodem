@@ -111,6 +111,12 @@ private:
     // Buffers
     uint8_t _txBuffer[256]; // Small chunk size for LoRa
     uint16_t _bufferIdx;
+
+    // File-info parsing for incoming ZFILE header (non-blocking accumulation)
+    uint8_t _fileInfoBuffer[512];
+    size_t _fileInfoIndex;
+    bool _fileInfoEscape;
+    bool _fileInfoAwaitingCRC;
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);

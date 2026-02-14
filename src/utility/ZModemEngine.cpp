@@ -23,6 +23,11 @@ ZModemEngine::ZModemEngine() {
     _bytesTransferred = 0;
     _fileSize = 0;
     _isSender = false;
+
+    // File-info parsing state
+    _fileInfoIndex = 0;
+    _fileInfoEscape = false;
+    _fileInfoAwaitingCRC = false;
 }
 
 void ZModemEngine::begin(Stream& ioStream) {
@@ -176,23 +181,28 @@ void ZModemEngine::_handleSenderLoop() {
              break;
 
         case STATE_SEND_ZDATA:
-             // Stream file data
-             if (_file && _file->available()) {
-                 uint8_t buf[128]; // chunk size
-                 size_t readLen = _file->read(buf, 128);
-                 if (readLen > 0) {
-                     bool isLast = (_file->available() == 0);
-                     // Note: We use ZDATA header with 4-byte offset flag here
-                     _sendBinaryHeader(ZDATA, (uint8_t*)&_bytesTransferred); 
-                     _sendDataSubpacket(buf, readLen, isLast);
-                     _bytesTransferred += readLen;
-                     lastSend = millis();
-                     if (isLast) _state = STATE_SEND_ZEOF;
-                 }
-             } else if (_bytesTransferred == _fileSize) {
-                 _state = STATE_SEND_ZEOF;
-             }
-             break;
+            // Stream file data
+            if (_file && _file->available()) {
+                uint8_t buf[128]; // chunk size
+                size_t readLen = _file->read(buf, 128);
+                if (readLen > 0) {
+                    bool isLast = (_file->available() == 0);
+                    // Use an explicit 4-byte little-endian offset for flags
+                    uint8_t pos[4];
+                    pos[0] = _bytesTransferred & 0xFF;
+                    pos[1] = (_bytesTransferred >> 8) & 0xFF;
+                    pos[2] = (_bytesTransferred >> 16) & 0xFF;
+                    pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                    _sendBinaryHeader(ZDATA, pos);
+                    _sendDataSubpacket(buf, readLen, isLast);
+                    _bytesTransferred += readLen;
+                    lastSend = millis();
+                    if (isLast) _state = STATE_SEND_ZEOF;
+                }
+            } else if (_bytesTransferred == _fileSize) {
+                _state = STATE_SEND_ZEOF;
+            }
+            break;
              
         case STATE_SEND_ZEOF:
              if (millis() - lastSend > 1000) {
@@ -237,13 +247,14 @@ void ZModemEngine::_handleReceiverLoop() {
                  _rState = RSTATE_AWAIT_HEADER;
              }
              else if (rxType == ZFILE) {
-                 // Sender announces file, expecting ZRPOS
-                 // In a full implementation, read the ZDATA subpacket here to get file name/size
-                 // For now, we assume we accept the previously defined file path.
-                 
-                 // Send ZRPOS 0 to accept (4 bytes position)
-                 _sendHexHeader(ZRPOS, ZERO_FLAGS);
-                 _rState = RSTATE_READ_ZDATA;
+                 // Sender announces file — next comes a data subpacket containing
+                 // NUL-terminated filename and ASCII filesize. Enter the
+                 // RSTATE_READ_ZFILE state and accumulate the subpacket
+                 // non-blocking (we will parse when the terminating ZDLE/... is seen).
+                 _fileInfoIndex = 0;
+                 _fileInfoEscape = false;
+                 _fileInfoAwaitingCRC = false;
+                 _rState = RSTATE_READ_ZFILE;
              }
              else if (rxType == ZDATA) {
                  // ZDATA header received, next bytes are subpacket data
@@ -267,11 +278,63 @@ void ZModemEngine::_handleReceiverLoop() {
     }
     
     // Data Writing Loop (if actively reading data)
-    if (_rState == RSTATE_READ_ZDATA && _file) {
+    if (_rState == RSTATE_READ_ZFILE) {
+        // Accumulate the ZFILE data subpacket (filename\0filesize\0), with ZDLE-escaping.
+        while (_io->available()) {
+            int c = _io->read();
+            if (c == -1) break;
+            uint8_t b = (uint8_t)c;
+
+            if (!_fileInfoEscape) {
+                if (b == ZDLE) { _fileInfoEscape = true; continue; }
+                if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) _fileInfoBuffer[_fileInfoIndex++] = b;
+                else { _state = STATE_ERROR; return; }
+            } else {
+                // Escaped byte or end-of-subpacket marker
+                _fileInfoEscape = false;
+
+                if (b == ZCRCE || b == ZCRCG) {
+                    // End-of-subpacket. Ensure CRC bytes are present (non-blocking check).
+                    if (_io->available() < 2) {
+                        _fileInfoAwaitingCRC = true;
+                        break; // wait for CRC bytes in next loop
+                    }
+                    // skip CRC (2 bytes)
+                    _io->read(); _io->read();
+
+                    // Null-terminate and parse filename and filesize
+                    _fileInfoBuffer[_fileInfoIndex] = 0;
+                    const char* p = (const char*)_fileInfoBuffer;
+                    size_t fnameLen = strlen(p);
+                    const char* sizeStr = p + fnameLen + 1;
+                    size_t parsedSize = 0;
+                    if (sizeStr && *sizeStr) parsedSize = strtoul(sizeStr, NULL, 10);
+
+                    _filename = String(p);
+                    _fileSize = parsedSize;
+
+                    // Acknowledge and move to reading actual file data
+                    _sendHexHeader(ZRPOS, ZERO_FLAGS);
+                    _rState = RSTATE_READ_ZDATA;
+
+                    // Reset file-info accumulators
+                    _fileInfoIndex = 0;
+                    _fileInfoEscape = false;
+                    _fileInfoAwaitingCRC = false;
+                    break;
+                } else {
+                    // Normal escaped byte
+                    uint8_t orig = b ^ 0x40;
+                    if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) _fileInfoBuffer[_fileInfoIndex++] = orig;
+                    else { _state = STATE_ERROR; return; }
+                }
+            }
+        }
+    }
+    
+    else if (_rState == RSTATE_READ_ZDATA && _file) {
         // Read directly from the underlying IO stream buffer (filled by Meshtastic stream)
-        // NOTE: This assumes the data arriving in the stream is clean file content, which
-        // is *true* for our simplified MeshtasticZModemStream and ZModemEngine design,
-        // but not true for traditional ZModem over serial with escaping.
+        // NOTE: This assumes the data arriving in the stream is clean file content.
         while (_io->available()) {
             int byte = _io->read();
             if (byte != -1) {
@@ -392,9 +455,11 @@ int ZModemEngine::_readHexHeader(uint8_t& type, uint8_t* flags) {
              flags[i] = strtoul(tmp, NULL, 16);
          }
          
-         // Skip CRC (4 chars) and CR/LF (2 chars) for simplified implementation
-         _io->readBytes(buf, 2); // Skip CRC MSB/LSB
-         _io->readBytes(buf, 2); // Skip CR/LF
+         // Skip CRC (4 hex chars) and CR/LF (2 chars) for simplified implementation
+         char crcChars[4];
+         if (_io->readBytes(crcChars, 4) < 4) return 0;
+         char crlf[2];
+         if (_io->readBytes(crlf, 2) < 2) return 0;
          
          return 1;
     }

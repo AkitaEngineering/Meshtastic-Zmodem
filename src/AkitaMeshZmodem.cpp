@@ -29,14 +29,18 @@ private:
     bool sendPacket() {
         if (_txBufferIndex == 0 || !_mesh) return true;
         if (_destinationNodeId == BROADCAST_ADDR) return false;
-        
-        uint8_t packet[_maxPacketSize];
+
+        // Use a fixed-size packet buffer (avoid VLA). Ensure we don't exceed
+        // either the configured max packet size or the internal TX buffer size.
+        uint8_t packet[AKZ_STREAM_TX_BUFFER_SIZE];
+        size_t maxPayload = (_maxPacketSize < AKZ_STREAM_TX_BUFFER_SIZE) ? (_maxPacketSize - 3) : (AKZ_STREAM_TX_BUFFER_SIZE - 3);
+
         packet[0] = _packetIdentifier;
         packet[1] = (_sentPacketId >> 8) & 0xFF;
         packet[2] = _sentPacketId & 0xFF;
-        
+
         size_t dataLen = _txBufferIndex;
-        if (dataLen > _maxPacketSize - 3) dataLen = _maxPacketSize - 3;
+        if (dataLen > maxPayload) dataLen = maxPayload;
 
         memcpy(packet + 3, _txBuffer, dataLen);
 
@@ -48,9 +52,9 @@ private:
         genericPacket.set_hop_limit(3);
 
         bool success = _mesh->sendPacket(&genericPacket);
-        if (success) { 
-            _sentPacketId++; 
-            _txBufferIndex = 0; 
+        if (success) {
+            _sentPacketId++;
+            _txBufferIndex = 0;
         }
         return success;
     }
@@ -82,9 +86,17 @@ public:
     virtual int read() override { return available() ? _rxBuffer[_rxBufferIndex++] : -1; }
     virtual int peek() override { return available() ? _rxBuffer[_rxBufferIndex] : -1; }
     virtual size_t write(uint8_t val) override {
-        if(!_mesh || _destinationNodeId == BROADCAST_ADDR) return 0;
+        if (!_mesh || _destinationNodeId == BROADCAST_ADDR) return 0;
+
+        // Prevent overflow of the internal TX buffer. If full, try to flush
+        // the pending packet first; if still full, fail the write.
+        if (_txBufferIndex >= AKZ_STREAM_TX_BUFFER_SIZE) {
+            flush();
+            if (_txBufferIndex >= AKZ_STREAM_TX_BUFFER_SIZE) return 0;
+        }
+
         _txBuffer[_txBufferIndex++] = val;
-        if(_txBufferIndex >= _maxPacketSize - 3) flush();
+        if (_txBufferIndex >= _maxPacketSize - 3) flush();
         return 1;
     }
     virtual void flush() override { sendPacket(); }
@@ -176,14 +188,17 @@ void AkitaMeshZmodem::abortTransfer() {
 
 AkitaMeshZmodem::TransferState AkitaMeshZmodem::loop() {
     if (_currentState == TransferState::IDLE || _currentState == TransferState::COMPLETE || _currentState == TransferState::ERROR) return _currentState;
-    
+
     int res = _zmodem.loop();
-    
+
+    // Mirror ZModem engine state into our public TransferState for better observability
+    _handleZmodemState((int)_zmodem.getState());
+
     // Update progress markers
     _bytesTransferred = _zmodem.getBytesTransferred();
     _totalFileSize = _zmodem.getFileSize(); // Try to get size from receiver status
     _updateProgress();
-    
+
     if (res == 1) {
         _currentState = TransferState::COMPLETE;
         _log("Transfer Complete!");
@@ -193,8 +208,32 @@ AkitaMeshZmodem::TransferState AkitaMeshZmodem::loop() {
         _logError("Transfer Error (ZModem Engine reported failure)");
         _transferFile.close();
     }
-    
+
     return _currentState;
+}
+
+
+// Map internal ZModem engine states to the public TransferState and log transitions
+void AkitaMeshZmodem::_handleZmodemState(int zState) {
+    // Don't override terminal states (COMPLETE/ERROR) here — loop() handles those.
+    switch(static_cast<ZModemEngine::State>(zState)) {
+        case ZModemEngine::STATE_SEND_ZRQINIT:
+        case ZModemEngine::STATE_SEND_ZFILE:
+        case ZModemEngine::STATE_SEND_ZDATA:
+            _currentState = TransferState::SENDING;
+            break;
+
+        case ZModemEngine::STATE_AWAIT_ZRINIT:
+        case ZModemEngine::STATE_AWAIT_ZRPOS:
+        case ZModemEngine::STATE_AWAIT_ZFIN:
+        case ZModemEngine::STATE_SEND_ZFIN:
+            _currentState = TransferState::RECEIVING;
+            break;
+
+        default:
+            // leave _currentState unchanged for other intermediary states
+            break;
+    }
 }
 
 // Getters & Setters
