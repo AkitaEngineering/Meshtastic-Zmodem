@@ -1,17 +1,15 @@
-# Akita Meshtastic ZModem Library & Module
+# Akita Meshtastic ZModem
 
-**Version: 1.1.0**
+Version: 1.1.0
 
-This project provides ZModem file transfer capabilities for [Meshtastic](https://meshtastic.org/) LoRa mesh networks. It includes:
+Adds reliable, targeted node-to-node file transfers to Meshtastic LoRa networks.
 
-1.  An **Arduino Library (`AkitaMeshZmodem`)**: Allows direct integration into custom Meshtastic Arduino sketches.
-2.  A **Meshtastic Module (`ZmodemModule`)**: Can be compiled into the main Meshtastic firmware to provide file transfer functionality controlled via mesh commands.
+Contents:
 
-This enables **reliable, targeted (node-to-node) binary file transfers** using a custom, **non-blocking** ZModem protocol engine built directly into the library, guaranteeing stability and zero external dependency issues.
+- `AkitaMeshZmodem` — Arduino library embedding a non-blocking ZModem engine.
+- `ZmodemModule` — Meshtastic firmware module for in-firmware operation.
 
-Developed and maintained by [Akita Engineering](https://akitaengineering.com).
-
-**License:** This project is licensed under the **GNU General Public License v3.0 (GPLv3)**.
+License: GNU GPLv3 — see `LICENSE`.
 
 ## Features
 
