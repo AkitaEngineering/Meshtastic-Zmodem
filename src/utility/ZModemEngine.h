@@ -136,6 +136,9 @@ private:
     // Optional debug stream for logging
     Stream* _debug = nullptr;
     void setDebug(Stream* debugStream) { _debug = debugStream; }
+    // XMODEM compatibility shim
+    bool _xmodemEnabled = false;
+    void enableXmodemCompatibility(bool enable) { _xmodemEnabled = enable; }
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);
@@ -153,6 +156,9 @@ private:
     // Helper State handlers
     void _handleSenderLoop();
     void _handleReceiverLoop();
+    // XMODEM fallback handlers
+    void _handleXmodemReceiver();
+    void _handleXmodemSender();
     
     // Internal tracking
     int _retryCount;

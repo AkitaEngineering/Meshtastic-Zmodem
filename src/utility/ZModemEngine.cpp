@@ -101,6 +101,15 @@ void ZModemEngine::abort() {
     _state = STATE_ERROR;
 }
 
+// Simple XMODEM constants
+#define XSOH 0x01
+#define XSTX 0x02
+#define XEOT 0x04
+#define XACK 0x06
+#define XNAK 0x15
+#define XCAN 0x18
+
+
 int ZModemEngine::loop() {
     if (_state == STATE_IDLE || _state == STATE_COMPLETE || _state == STATE_ERROR) {
         return (_state == STATE_COMPLETE) ? 1 : (_state == STATE_ERROR ? -1 : 0);
@@ -529,6 +538,84 @@ void ZModemEngine::_handleReceiverLoop() {
     if (millis() - lastAck > 3000 && _state != STATE_COMPLETE && _state != STATE_ERROR) {
         _sendHexHeader(ZRINIT, ZERO_FLAGS); // Keep poking sender
         lastAck = millis();
+    }
+
+    // If XMODEM compatibility enabled and we haven't entered ZMODEM transfer after some time,
+    // try XMODEM handling (non-blocking). This allows legacy tools to send via XMODEM.
+    if (_xmodemEnabled && _state != STATE_COMPLETE && _state != STATE_ERROR) {
+        _handleXmodemReceiver();
+    }
+}
+
+// Basic XMODEM receiver (non-blocking, checksum-based fallback)
+void ZModemEngine::_handleXmodemReceiver() {
+    if (!_io || !_file) return;
+    // Non-blocking: only proceed if there's at least one byte
+    if (!_io->available()) return;
+
+    int c = _io->peek();
+    if (c == -1) return;
+
+    // We implement a very small stateful XMODEM receiver here: read blocks of 128 bytes
+    // Format: SOH (1), blk # (1), 255-blk# (1), 128 data bytes, checksum (1)
+    // or EOT (4) to finish.
+
+    int in = _io->read();
+    if (in == -1) return;
+    if (in == XEOT) {
+        // End of transmission
+        _io->write(XACK);
+        _state = STATE_COMPLETE;
+        if (_debug) _debug->print("ZModemEngine: XMODEM EOT received, transfer complete\n");
+        return;
+    }
+
+    if (in != XSOH) {
+        // Not an XMODEM block start; ignore
+        return;
+    }
+
+    // Need 1+1+128+1 = 131 more bytes
+    if (_io->available() < 130) {
+        // wait for full block
+        return;
+    }
+
+    int blk = _io->read();
+    int blkComp = _io->read();
+    if ((blk ^ blkComp) != 0xFF) {
+        // bad block header
+        _io->write(XNAK);
+        return;
+    }
+
+    uint8_t data[128];
+    for (int i = 0; i < 128; ++i) {
+        int b = _io->read();
+        if (b == -1) { _io->write(XNAK); return; }
+        data[i] = (uint8_t)b;
+    }
+    int checksum = _io->read();
+    if (checksum == -1) { _io->write(XNAK); return; }
+
+    // compute simple checksum
+    uint8_t sum = 0;
+    for (int i = 0; i < 128; ++i) sum = (uint8_t)(sum + data[i]);
+
+    if (sum != (uint8_t)checksum) {
+        // bad checksum
+        _io->write(XNAK);
+        return;
+    }
+
+    // write data to file
+    _file->write(data, 128);
+    _bytesTransferred += 128;
+    _io->write(XACK);
+    if (_debug) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "ZModemEngine: XMODEM block %d OK", blk);
+        _debug->println(tmp);
     }
 }
 
