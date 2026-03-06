@@ -68,8 +68,8 @@ private:
     void _resetTransferState();
     void _updateProgress();
     void _handleZmodemState(int zState); // Adjusted signature
-    void _log(const String& message);
-    void _logError(const String& message);
+    void _log(const char* message);
+    void _logError(const char* message);
 };
 
 #endif // AKITA_MESH_ZMODEM_H

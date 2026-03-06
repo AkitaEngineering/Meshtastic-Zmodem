@@ -24,7 +24,7 @@ private:
     uint16_t _txBufferIndex = 0;
     uint16_t _sentPacketId = 0;
 
-    void _streamLog(const String& msg) { if(_debug) { _debug->print("MeshStream: "); _debug->println(msg); } }
+    void _streamLog(const char* msg) { if(_debug) { _debug->print("MeshStream: "); _debug->println(msg); } }
 
     bool sendPacket() {
         if (_txBufferIndex == 0 || !_mesh) return true;
@@ -160,7 +160,11 @@ bool AkitaMeshZmodem::startSend(const String& filePath, NodeNum dest) {
     if(_zmodem.send(_zmodemTimeout)) {
         _currentState = TransferState::SENDING;
         _transferStartTime = millis();
-        _log("Starting Send to 0x" + String(dest, HEX) + " for: " + filePath);
+        {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "Starting Send to 0x%lX for: %s", (unsigned long)dest, filePath.c_str());
+            _log(buf);
+        }
         return true;
     }
     return false;
@@ -179,7 +183,11 @@ bool AkitaMeshZmodem::startReceive(const String& filePath) {
     if(_zmodem.receive(_zmodemTimeout)) {
         _currentState = TransferState::RECEIVING;
         _transferStartTime = millis();
-        _log("Starting Receive to: " + filePath);
+        {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "Starting Receive to: %s", filePath.c_str());
+            _log(buf);
+        }
         return true;
     }
     return false;
@@ -251,15 +259,17 @@ void AkitaMeshZmodem::setProgressUpdateInterval(unsigned long i) { _progressUpda
 
 void AkitaMeshZmodem::_updateProgress() {
     if (_progressUpdateInterval > 0 && millis() - _lastProgressUpdate > _progressUpdateInterval) {
-        String msg = "Progress: " + String(_bytesTransferred) + " bytes";
+        char buf[128];
         if (getTotalFileSize() > 0) {
             float percent = (float)_bytesTransferred / getTotalFileSize() * 100.0f;
-            msg += " (" + String(percent, 1) + "%)";
+            snprintf(buf, sizeof(buf), "Progress: %lu bytes (%.1f%%)", (unsigned long)_bytesTransferred, percent);
+        } else {
+            snprintf(buf, sizeof(buf), "Progress: %lu bytes", (unsigned long)_bytesTransferred);
         }
-        _log(msg);
+        _log(buf);
         _lastProgressUpdate = millis();
     }
 }
 
-void AkitaMeshZmodem::_log(const String& msg) { if(_debug) { _debug->print("[Akita] "); _debug->println(msg); } }
-void AkitaMeshZmodem::_logError(const String& msg) { if(_debug) { _debug->print("[Akita ERR] "); _debug->println(msg); } }
+void AkitaMeshZmodem::_log(const char* msg) { if(_debug) { _debug->print("[Akita] "); _debug->println(msg); } }
+void AkitaMeshZmodem::_logError(const char* msg) { if(_debug) { _debug->print("[Akita ERR] "); _debug->println(msg); } }
