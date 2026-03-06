@@ -115,6 +115,15 @@ private:
     uint8_t _txBuffer[256]; // Small chunk size for LoRa
     uint16_t _bufferIdx;
 
+    // Retransmit / backoff state
+    uint8_t _lastDataBuf[256];
+    size_t _lastDataLen;
+    size_t _lastDataPos; // file offset for the lastDataBuf
+    bool _lastDataPending;
+    unsigned long _lastSendTime;
+    unsigned long _retryIntervalMs;
+    unsigned long _baseRetryIntervalMs;
+
     // File-info parsing for incoming ZFILE header (non-blocking accumulation)
     uint8_t _fileInfoBuffer[512];
     size_t _fileInfoIndex;
@@ -148,6 +157,9 @@ private:
     // Internal tracking
     int _retryCount;
     static const int MAX_RETRIES = 5;
+
+    static const unsigned long DEFAULT_BASE_RETRY_MS = 500; // 0.5s base retry
+    static const unsigned long MAX_RETRY_INTERVAL_MS = 8000; // cap backoff
 };
 
 #endif // ZMODEM_ENGINE_H

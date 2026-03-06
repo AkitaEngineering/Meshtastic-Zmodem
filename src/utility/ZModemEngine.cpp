@@ -28,6 +28,14 @@ ZModemEngine::ZModemEngine() {
     _fileInfoIndex = 0;
     _fileInfoEscape = false;
     _fileInfoAwaitingCRC = false;
+
+    // Retransmit state
+    _lastDataLen = 0;
+    _lastDataPos = 0;
+    _lastDataPending = false;
+    _lastSendTime = 0;
+    _baseRetryIntervalMs = DEFAULT_BASE_RETRY_MS;
+    _retryIntervalMs = _baseRetryIntervalMs;
 }
 
 void ZModemEngine::begin(Stream& ioStream) {
@@ -151,12 +159,22 @@ void ZModemEngine::_handleSenderLoop() {
                     break;
                 case STATE_SEND_ZDATA:
                      if (rxType == ZACK) {
-                         // Chunk acked, continue (handled implicitly by ZRPOS check)
+                         // Chunk acked: clear pending resend state and reset backoff
+                         _lastDataPending = false;
+                         _retryCount = 0;
+                         _retryIntervalMs = _baseRetryIntervalMs;
                      } else if (rxType == ZRPOS) {
                          // Resend from pos (Error or checkpoint)
                          size_t pos = rxFlags[0] | (rxFlags[1] << 8) | (rxFlags[2] << 16) | (rxFlags[3] << 24);
                          if (_file) _file->seek(pos);
                          _bytesTransferred = pos;
+                         // If we have cached data overlapping this position, mark pending so sender will retransmit
+                         if (_lastDataLen > 0 && _lastDataPos == pos) {
+                             _lastDataPending = true;
+                             _retryIntervalMs = _baseRetryIntervalMs;
+                             _lastSendTime = millis();
+                             _retryCount = 0;
+                         }
                      }
                      break;
                 case STATE_SEND_ZEOF:
@@ -225,26 +243,56 @@ void ZModemEngine::_handleSenderLoop() {
              break;
 
         case STATE_SEND_ZDATA:
-            // Stream file data
-            if (_file && _file->available()) {
-                uint8_t buf[128]; // chunk size
-                size_t readLen = _file->read(buf, 128);
-                if (readLen > 0) {
-                    bool isLast = (_file->available() == 0);
-                    // Use an explicit 4-byte little-endian offset for flags
+            // If we have a pending last-data that needs retransmit and the retry timer expired, resend
+            if (_lastDataPending) {
+                if (millis() - _lastSendTime >= _retryIntervalMs) {
+                    if (_retryCount >= MAX_RETRIES) {
+                        // Too many retries, abort
+                        _state = STATE_ERROR;
+                        if (_debug) _debug->print("ZModemEngine: max retries exceeded, aborting\n");
+                        return;
+                    }
+                    // Retransmit last header + data
                     uint8_t pos[4];
-                    pos[0] = _bytesTransferred & 0xFF;
-                    pos[1] = (_bytesTransferred >> 8) & 0xFF;
-                    pos[2] = (_bytesTransferred >> 16) & 0xFF;
-                    pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                    pos[0] = _lastDataPos & 0xFF;
+                    pos[1] = (_lastDataPos >> 8) & 0xFF;
+                    pos[2] = (_lastDataPos >> 16) & 0xFF;
+                    pos[3] = (_lastDataPos >> 24) & 0xFF;
                     _sendBinaryHeader(ZDATA, pos);
-                    _sendDataSubpacket(buf, readLen, isLast);
-                    _bytesTransferred += readLen;
-                    lastSend = millis();
-                    if (isLast) _state = STATE_SEND_ZEOF;
+                    _sendDataSubpacket(_lastDataBuf, _lastDataLen, false);
+                    _lastSendTime = millis();
+                    _retryCount++;
+                    _retryIntervalMs = (unsigned long)min((unsigned long)MAX_RETRY_INTERVAL_MS, _retryIntervalMs * 2UL);
                 }
-            } else if (_bytesTransferred == _fileSize) {
-                _state = STATE_SEND_ZEOF;
+            } else {
+                // Stream new file data into a buffer and send
+                if (_file && _file->available()) {
+                    size_t chunkSz = sizeof(_lastDataBuf);
+                    size_t readLen = _file->read(_lastDataBuf, chunkSz);
+                    if (readLen > 0) {
+                        bool isLast = (_file->available() == 0);
+                        // Use an explicit 4-byte little-endian offset for flags
+                        uint8_t pos[4];
+                        pos[0] = _bytesTransferred & 0xFF;
+                        pos[1] = (_bytesTransferred >> 8) & 0xFF;
+                        pos[2] = (_bytesTransferred >> 16) & 0xFF;
+                        pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                        _sendBinaryHeader(ZDATA, pos);
+                        _sendDataSubpacket(_lastDataBuf, readLen, isLast);
+                        // Cache last data for potential retransmit
+                        _lastDataLen = readLen;
+                        _lastDataPos = _bytesTransferred;
+                        _lastDataPending = true;
+                        _lastSendTime = millis();
+                        _retryCount = 0;
+                        _retryIntervalMs = _baseRetryIntervalMs;
+
+                        _bytesTransferred += readLen;
+                        if (isLast) _state = STATE_SEND_ZEOF;
+                    }
+                } else if (_bytesTransferred == _fileSize) {
+                    _state = STATE_SEND_ZEOF;
+                }
             }
             break;
              
