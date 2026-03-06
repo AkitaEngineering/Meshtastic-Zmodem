@@ -32,6 +32,10 @@ ZModemEngine::ZModemEngine() {
 
 void ZModemEngine::begin(Stream& ioStream) {
     _io = &ioStream;
+    _inBufLen = 0;
+    if (_debug) {
+        _debug->print("ZModemEngine: begin\n");
+    }
 }
 
 void ZModemEngine::setFileStream(File* file, const String& filename, size_t fileSize) {
@@ -49,6 +53,9 @@ bool ZModemEngine::send(unsigned long timeout) {
     _operationStartTime = millis();
     _lastActivity = millis();
     _retryCount = 0;
+    if (_debug) {
+        _debug->print("ZModemEngine: send() started\n");
+    }
     return true;
 }
 
@@ -63,6 +70,9 @@ bool ZModemEngine::receive(unsigned long timeout) {
     
     // Receiver sends ZRINIT to start
     _sendHexHeader(ZRINIT, ZERO_FLAGS); 
+    if (_debug) {
+        _debug->print("ZModemEngine: receive() started, ZRINIT sent\n");
+    }
     return true;
 }
 
@@ -82,6 +92,9 @@ int ZModemEngine::loop() {
     // Timeout Check
     if (millis() - _lastActivity > _timeoutMs) {
         _state = STATE_ERROR;
+        if (_debug) {
+            _debug->print("ZModemEngine: timeout exceeded, entering ERROR state\n");
+        }
         return -1;
     }
 
@@ -90,7 +103,12 @@ int ZModemEngine::loop() {
     } else {
         _handleReceiverLoop();
     }
-    
+    if (_debug) {
+        // Log non-fatal state transitions for visibility
+        _debug->print("ZModemEngine: loop tick, state=");
+        _debug->print((int)_state);
+        _debug->print("\n");
+    }
     return (_state == STATE_COMPLETE) ? 1 : (_state == STATE_ERROR ? -1 : 0);
 }
 
@@ -169,13 +187,17 @@ void ZModemEngine::_handleSenderLoop() {
                  fileInfo += (char)0;
                  fileInfo += String(_fileSize);
                  fileInfo += (char)0;
-                 
-                 uint8_t payload[128];
+
+                 // Safely copy into a bounded buffer and log truncation
+                 char payload[128];
                  size_t len = fileInfo.length();
-                 if (len > 127) len = 127;
-                 fileInfo.getBytes(payload, 128);
-                 
-                 _sendDataSubpacket(payload, len, true); // End frame
+                 if (len > 127) {
+                     len = 127;
+                     // copy and ensure termination
+                 }
+                 fileInfo.toCharArray(payload, len + 1);
+
+                 _sendDataSubpacket((const uint8_t*)payload, len, true); // End frame
                  lastSend = millis();
              }
              break;
@@ -280,27 +302,28 @@ void ZModemEngine::_handleReceiverLoop() {
     // Data Writing Loop (if actively reading data)
     if (_rState == RSTATE_READ_ZFILE) {
         // Accumulate the ZFILE data subpacket (filename\0filesize\0), with ZDLE-escaping.
-        while (_io->available()) {
-            int c = _io->read();
-            if (c == -1) break;
-            uint8_t b = (uint8_t)c;
-
+        // Read available bytes non-destructively into the internal input buffer
+        _fillInput();
+        // Parse from _inBuf similar to header parsing but handle ZFILE subpacket bytes
+        // We will consume bytes from _inBuf as we process them.
+        size_t idx = 0;
+        while (idx < _inBufLen) {
+            uint8_t b = _inBuf[idx++];
             if (!_fileInfoEscape) {
                 if (b == ZDLE) { _fileInfoEscape = true; continue; }
                 if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) _fileInfoBuffer[_fileInfoIndex++] = b;
                 else { _state = STATE_ERROR; return; }
             } else {
-                // Escaped byte or end-of-subpacket marker
                 _fileInfoEscape = false;
-
                 if (b == ZCRCE || b == ZCRCG) {
-                    // End-of-subpacket. Ensure CRC bytes are present (non-blocking check).
-                    if (_io->available() < 2) {
-                        _fileInfoAwaitingCRC = true;
-                        break; // wait for CRC bytes in next loop
+                    // End-of-subpacket. Need two CRC bytes; ensure they are in _inBuf
+                    if (idx + 2 > _inBufLen) {
+                        // not enough bytes yet; roll back idx and wait
+                        idx -= 1; // put back the marker
+                        break;
                     }
-                    // skip CRC (2 bytes)
-                    _io->read(); _io->read();
+                    // skip CRC bytes
+                    idx += 2;
 
                     // Null-terminate and parse filename and filesize
                     _fileInfoBuffer[_fileInfoIndex] = 0;
@@ -321,6 +344,11 @@ void ZModemEngine::_handleReceiverLoop() {
                     _fileInfoIndex = 0;
                     _fileInfoEscape = false;
                     _fileInfoAwaitingCRC = false;
+
+                    // Remove consumed bytes from _inBuf
+                    if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
+                    _inBufLen -= idx;
+                    idx = 0;
                     break;
                 } else {
                     // Normal escaped byte
@@ -330,17 +358,25 @@ void ZModemEngine::_handleReceiverLoop() {
                 }
             }
         }
+        // if we've consumed some bytes without finishing, remove them
+        if (idx > 0 && idx <= _inBufLen) {
+            if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
+            _inBufLen -= idx;
+        }
     }
     
     else if (_rState == RSTATE_READ_ZDATA && _file) {
-        // Read directly from the underlying IO stream buffer (filled by Meshtastic stream)
-        // NOTE: This assumes the data arriving in the stream is clean file content.
-        while (_io->available()) {
-            int byte = _io->read();
-            if (byte != -1) {
-                _file->write((uint8_t)byte);
-                _bytesTransferred++;
-            }
+        // Bulk-read available bytes and write in chunks to avoid per-byte writes.
+        uint8_t buf[128];
+        size_t idx = 0;
+        while (_io->available() && idx < sizeof(buf)) {
+            int c = _io->read();
+            if (c == -1) break;
+            buf[idx++] = (uint8_t)c;
+        }
+        if (idx > 0) {
+            _file->write(buf, idx);
+            _bytesTransferred += idx;
         }
     }
     
@@ -430,39 +466,61 @@ uint16_t ZModemEngine::_updcrc(uint8_t c, uint16_t crc) {
 
 // Simplified Header Reader
 int ZModemEngine::_readHexHeader(uint8_t& type, uint8_t* flags) {
-    // Looks for ** [ZDLE] B
-    // NOTE: This assumes the MeshtasticZModemStream has fully buffered and provided clean packet data.
-    
-    // Fast path check for minimal header size (2 ZPAD + ZDLE + ZHEX + 5 data bytes + 2 CRC bytes + CR + LF)
-    if (_io->available() < 12) return 0;
+    // Non-destructive header parsing using internal buffer. We fill from
+    // _io when available and parse only from _inBuf; bytes are removed from
+    // the buffer only when a complete header is consumed.
 
-    // Buffer the potential header start for reliable parsing
-    // This is the core reason for relying on the external buffer/Stream implementation
-    
-    if (_io->read() == ZPAD && _io->read() == ZPAD && _io->read() == ZDLE && _io->read() == ZHEX) {
-         // Found header start, read digits
-         char buf[2];
-         
-         // Read Type
-         if(_io->readBytes(buf, 2) < 2) return 0;
-         char tmp[3] = {buf[0], buf[1], 0};
-         type = strtoul(tmp, NULL, 16);
-         
-         // Read Flags (4 bytes * 2 chars)
-         for(int i=0; i<4; i++) {
-             if(_io->readBytes(buf, 2) < 2) return 0;
-             tmp[0] = buf[0]; tmp[1] = buf[1];
-             flags[i] = strtoul(tmp, NULL, 16);
-         }
-         
-         // Skip CRC (4 hex chars) and CR/LF (2 chars) for simplified implementation
-         char crcChars[4];
-         if (_io->readBytes(crcChars, 4) < 4) return 0;
-         char crlf[2];
-         if (_io->readBytes(crlf, 2) < 2) return 0;
-         
-         return 1;
+    _fillInput();
+
+    // Minimum expected header length: 4 control bytes + 2(type) + 8(flags) + 4(crc) + 2(CRLF) = 20
+    const size_t MIN_HDR_LEN = 20;
+    if (_inBufLen < MIN_HDR_LEN) return 0;
+
+    // Look for header start at buffer start
+    if (!(_inBuf[0] == ZPAD && _inBuf[1] == ZPAD && _inBuf[2] == ZDLE && _inBuf[3] == ZHEX)) return 0;
+
+    // Ensure we have all ascii hex characters following
+    // ascii hex digits start at index 4 and span 16 bytes (2 + 8 + 4 + 2)
+    if (_inBufLen < 4 + 16) return 0;
+
+    auto hexToByte = [](uint8_t hi, uint8_t lo) -> uint8_t {
+        auto val = [](uint8_t c)->int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            return -1;
+        };
+        int h = val(hi); int l = val(lo);
+        if (h < 0 || l < 0) return 0;
+        return (uint8_t)((h << 4) | l);
+    };
+
+    // Parse type
+    type = hexToByte(_inBuf[4], _inBuf[5]);
+    // Parse 4 flags (each two hex chars)
+    for (int i = 0; i < 4; ++i) {
+        size_t idx = 6 + i * 2;
+        flags[i] = hexToByte(_inBuf[idx], _inBuf[idx+1]);
     }
-    
-    return 0;
+
+    // We consumed 4 control bytes + 16 ascii hex chars = 20 bytes
+    size_t consumed = 4 + 16;
+    // Remove consumed bytes from buffer
+    if (consumed < _inBufLen) memmove(_inBuf, _inBuf + consumed, _inBufLen - consumed);
+    _inBufLen -= consumed;
+    return 1;
+}
+
+void ZModemEngine::_fillInput() {
+    if (!_io) return;
+    int avail = _io->available();
+    if (avail <= 0) return;
+    size_t space = sizeof(_inBuf) - _inBufLen;
+    if (space == 0) return;
+    int toRead = avail < (int)space ? avail : (int)space;
+    for (int i = 0; i < toRead; ++i) {
+        int c = _io->read();
+        if (c == -1) break;
+        _inBuf[_inBufLen++] = (uint8_t)c;
+    }
 }

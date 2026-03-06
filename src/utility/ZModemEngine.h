@@ -117,6 +117,13 @@ private:
     size_t _fileInfoIndex;
     bool _fileInfoEscape;
     bool _fileInfoAwaitingCRC;
+    // Internal input buffer to avoid destructive reads on Stream
+    uint8_t _inBuf[512];
+    size_t _inBufLen;
+    void _fillInput();
+    // Optional debug stream for logging
+    Stream* _debug = nullptr;
+    void setDebug(Stream* debugStream) { _debug = debugStream; }
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);

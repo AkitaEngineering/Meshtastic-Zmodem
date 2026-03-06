@@ -21,7 +21,7 @@
  * This needs to be long enough to account for LoRa latency and potential retries.
  */
 #ifndef AKZ_DEFAULT_ZMODEM_TIMEOUT
-#define AKZ_DEFAULT_ZMODEM_TIMEOUT 30000 // 30 seconds
+#define AKZ_DEFAULT_ZMODEM_TIMEOUT 20000 // 20 seconds (tightened from 30s)
 #endif
 
 /**

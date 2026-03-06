@@ -33,7 +33,9 @@ private:
         // Use a fixed-size packet buffer (avoid VLA). Ensure we don't exceed
         // either the configured max packet size or the internal TX buffer size.
         uint8_t packet[AKZ_STREAM_TX_BUFFER_SIZE];
-        size_t maxPayload = (_maxPacketSize < AKZ_STREAM_TX_BUFFER_SIZE) ? (_maxPacketSize - 3) : (AKZ_STREAM_TX_BUFFER_SIZE - 3);
+        // Ensure _maxPacketSize is reasonable to avoid underflow when subtracting header bytes
+        size_t effectiveMaxPacket = (_maxPacketSize < 4) ? 4 : _maxPacketSize;
+        size_t maxPayload = (effectiveMaxPacket < AKZ_STREAM_TX_BUFFER_SIZE) ? (effectiveMaxPacket - 3) : (AKZ_STREAM_TX_BUFFER_SIZE - 3);
 
         packet[0] = _packetIdentifier;
         packet[1] = (_sentPacketId >> 8) & 0xFF;
@@ -96,7 +98,9 @@ public:
         }
 
         _txBuffer[_txBufferIndex++] = val;
-        if (_txBufferIndex >= _maxPacketSize - 3) flush();
+        // Guard against underflow and ensure we don't exceed the max packet payload
+        size_t effectiveMaxPacket2 = (_maxPacketSize < 4) ? 4 : _maxPacketSize;
+        if (_txBufferIndex >= effectiveMaxPacket2 - 3) flush();
         return 1;
     }
     virtual void flush() override { sendPacket(); }
