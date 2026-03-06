@@ -9,6 +9,7 @@
 #define AKITA_MESH_ZMODEM_H
 
 #include <Arduino.h>
+#include "globals.h"    // bring in SPIFFS macro stub
 #include <Meshtastic.h>
 #include <StreamUtils.h>
 #include <FS.h>

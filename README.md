@@ -74,3 +74,28 @@ When integrating into custom code:
 * `begin(mesh, Filesystem, &Serial)`: Initialize the engine and set up the transport streams.
 * `loop()`: Must be called continuously in your main loop to process the ZModem state machine.
 * `processDataPacket(MeshPacket& packet)`: **CRITICAL.** This method is used to push raw data packets received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) directly into the ZModem engine's input buffer.
+
+
+## Additional tools and testing
+
+Two helper scripts have been added under `tools/` to simplify exercising the
+module on a host machine:
+
+* `serial_proxy.py` – creates a PTY and proxies it to a real serial device.
+  Run your host-side XMODEM/SZ/SX tool against the PTY to talk to the board.
+* `auto_xmodem_test.py` – automation harness that invokes `sz --xmodem` and
+  validates the received file.  Useful for CI or sanity checks without
+  hardware.
+
+The internal ZModem engine now includes **XMODEM compatibility** (CRC or
+checksum), automatic retransmit/backoff, and a cached‑block sender mode to
+avoid file seeks on retry.
+
+### Building without Meshtastic
+
+The PlatformIO project has been configured to allow the code to compile with
+only stubbed versions of the Meshtastic and StreamUtils libraries (see
+`lib/…`); this makes it possible to verify the ZModem engine builds even
+when the real dependencies are not available.  To perform a full build the
+real Meshtastic package from the Arduino registry is required.
+

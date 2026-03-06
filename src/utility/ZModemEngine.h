@@ -153,6 +153,11 @@ private:
     int _xmodemSendRetry = 0;
     unsigned long _xmodemSendLast = 0;
     unsigned long _xmodemSendInterval = 0;
+    // Cached last-sent XMODEM block to allow immediate retransmit without file seek
+    uint8_t _xmodemLastBlock[128];
+    size_t _xmodemLastLen = 0;
+    size_t _xmodemLastPos = 0; // file offset for the last-sent block
+    bool _xmodemLastPending = false;
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);

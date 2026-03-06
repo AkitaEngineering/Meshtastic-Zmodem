@@ -36,6 +36,10 @@ ZModemEngine::ZModemEngine() {
     _lastSendTime = 0;
     _baseRetryIntervalMs = DEFAULT_BASE_RETRY_MS;
     _retryIntervalMs = _baseRetryIntervalMs;
+    // XMODEM cache init
+    _xmodemLastLen = 0;
+    _xmodemLastPos = 0;
+    _xmodemLastPending = false;
 }
 
 void ZModemEngine::begin(Stream& ioStream) {
@@ -717,10 +721,17 @@ void ZModemEngine::_handleXmodemSender() {
                 _xmodemSendLast = 0;
                 _xmodemSendRetry = 0;
                 _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+                // On ACK, commit the cached block (advance bytesTransferred) and clear cache
+                if (_xmodemLastPending) {
+                    // commit position
+                    _bytesTransferred = _xmodemLastPos + _xmodemLastLen;
+                    _xmodemLastPending = false;
+                }
             } else if (r == XNAK) {
                 // resend last block
                 if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
                 _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
+                // leave _xmodemLastPending true and schedule immediate resend
                 _xmodemSendLast = 0; // trigger resend below
             } else if (r == XCAN) {
                 _state = STATE_ERROR; return;
@@ -753,7 +764,10 @@ void ZModemEngine::_handleXmodemSender() {
                     _state = STATE_COMPLETE;
                     return;
                 } else if (r == XNAK) {
-                    if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+                    if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) {
+                        _state = STATE_ERROR;
+                        return;
+                    }
                     _xmodemSendLast = 0; // resend EOT
                     _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
                     return;
@@ -761,46 +775,56 @@ void ZModemEngine::_handleXmodemSender() {
             }
             // timeout handling
             if (millis() - _xmodemSendLast >= _xmodemSendInterval) {
-                if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+                if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) {
+                    _state = STATE_ERROR;
+                    return;
+                }
                 _xmodemSendLast = 0; // resend
                 _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
             }
             return;
+        }
     }
 
-    // Prepare block
-    uint8_t block[128];
-    size_t toRead = 128;
-    size_t readLen = 0;
-    if (_file) {
-        readLen = _file->read(block, 128);
-    } else {
-        readLen = 0;
-    }
-    if (readLen < 128) {
-        // pad with CTRL-Z
-        for (size_t i = readLen; i < 128; ++i) block[i] = 0x1A;
+    // Prepare/send block using cached buffer when available. This avoids extra
+    // file seeks/reads on retransmit and enables immediate resend of the last block.
+    if (!_xmodemLastPending) {
+        // Need to fill cache with next block
+        if (_file) {
+            // ensure file pointer
+            _file->seek(_bytesTransferred);
+            size_t readLen = _file->read(_xmodemLastBlock, 128);
+            _xmodemLastLen = readLen;
+            // pad if short
+            if (_xmodemLastLen < 128) {
+                for (size_t i = _xmodemLastLen; i < 128; ++i) _xmodemLastBlock[i] = 0x1A;
+            }
+        } else {
+            // no file -> send empty padded block
+            _xmodemLastLen = 0;
+            for (size_t i = 0; i < 128; ++i) _xmodemLastBlock[i] = 0x1A;
+        }
+        _xmodemLastPos = _bytesTransferred;
+        _xmodemLastPending = true;
     }
 
-    // Send SOH, blk, ~blk, data, CRC
+    // Send the cached block (either first-send or retransmit)
     _io->write(XSOH);
     _io->write(_xmodemSendBlock);
     _io->write(255 - _xmodemSendBlock);
-    _io->write(block, 128);
+    _io->write(_xmodemLastBlock, 128);
     if (_xmodemUseCRC) {
-        uint16_t crc = _calcCRC16(block, 128);
+        uint16_t crc = _calcCRC16(_xmodemLastBlock, 128);
         _io->write((crc >> 8) & 0xFF);
         _io->write(crc & 0xFF);
     } else {
-        uint8_t sum = 0; for (int i = 0; i < 128; ++i) sum = (uint8_t)(sum + block[i]);
+        uint8_t sum = 0; for (int i = 0; i < 128; ++i) sum = (uint8_t)(sum + _xmodemLastBlock[i]);
         _io->write(sum);
     }
 
     _xmodemSendLast = millis();
     _xmodemSendRetry = 0;
     _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
-    // advance bytesTransferred immediately (we will retransmit cached data if needed)
-    _bytesTransferred += readLen;
 }
 
 
