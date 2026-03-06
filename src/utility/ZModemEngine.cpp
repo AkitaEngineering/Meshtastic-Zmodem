@@ -553,69 +553,120 @@ void ZModemEngine::_handleXmodemReceiver() {
     // Non-blocking: only proceed if there's at least one byte
     if (!_io->available()) return;
 
+    // We'll attempt CRC-mode first if enabled. If not started, periodically send 'C' to request CRC.
+    if (!_xmodemStarted) {
+        unsigned long now = millis();
+        if (_xmodemRetryInterval == 0) {
+            _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
+            _xmodemLastSend = 0;
+            _xmodemRetryCount = 0;
+        }
+        if (now - _xmodemLastSend >= _xmodemRetryInterval) {
+            // send requester: 'C' for CRC mode or NAK for checksum
+            if (_xmodemUseCRC) _io->write('C'); else _io->write(XNAK);
+            _xmodemLastSend = now;
+            _xmodemRetryCount++;
+            // exponential backoff
+            if (_xmodemRetryInterval < MAX_RETRY_INTERVAL_MS) _xmodemRetryInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemRetryInterval * 2UL);
+            if (_xmodemRetryCount > XMODEM_MAX_RETRIES) {
+                if (_debug) _debug->print("ZModemEngine: XMODEM no response, giving up\n");
+                _xmodemStarted = false;
+                return;
+            }
+        }
+        // wait for incoming starter
+        if (!_io->available()) return;
+    }
+
     int c = _io->peek();
     if (c == -1) return;
 
-    // We implement a very small stateful XMODEM receiver here: read blocks of 128 bytes
-    // Format: SOH (1), blk # (1), 255-blk# (1), 128 data bytes, checksum (1)
-    // or EOT (4) to finish.
-
-    int in = _io->read();
-    if (in == -1) return;
-    if (in == XEOT) {
-        // End of transmission
+    // Check for EOT
+    if (c == XEOT) {
+        _io->read();
         _io->write(XACK);
         _state = STATE_COMPLETE;
         if (_debug) _debug->print("ZModemEngine: XMODEM EOT received, transfer complete\n");
         return;
     }
 
-    if (in != XSOH) {
-        // Not an XMODEM block start; ignore
+    // Looking for SOH/ STX
+    if (c != XSOH && c != XSTX) {
+        // If we receive a SOH/STX later, handle; otherwise, consume unknown bytes minimally
+        // but avoid consuming unrelated traffic
         return;
     }
 
-    // Need 1+1+128+1 = 131 more bytes
-    if (_io->available() < 130) {
-        // wait for full block
-        return;
-    }
-
+    // Now we have a block start; ensure enough bytes are available for header
+    if (_io->available() < 3) return;
+    int start = _io->read(); // consume SOH/STX
     int blk = _io->read();
     int blkComp = _io->read();
     if ((blk ^ blkComp) != 0xFF) {
-        // bad block header
         _io->write(XNAK);
         return;
     }
 
-    uint8_t data[128];
-    for (int i = 0; i < 128; ++i) {
-        int b = _io->read();
-        if (b == -1) { _io->write(XNAK); return; }
-        data[i] = (uint8_t)b;
-    }
-    int checksum = _io->read();
-    if (checksum == -1) { _io->write(XNAK); return; }
-
-    // compute simple checksum
-    uint8_t sum = 0;
-    for (int i = 0; i < 128; ++i) sum = (uint8_t)(sum + data[i]);
-
-    if (sum != (uint8_t)checksum) {
-        // bad checksum
-        _io->write(XNAK);
+    size_t blockSize = (start == XSOH) ? 128 : 1024;
+    // Wait until full block + checksum/crc available
+    size_t needed = blockSize + (_xmodemUseCRC ? 2 : 1);
+    if ((size_t)_io->available() < needed) {
+        // put back header? cannot easily unread; instead, wait until bytes arrive
+        // Note: we've consumed header bytes; keep parsing as bytes arrive in future calls.
         return;
     }
 
-    // write data to file
-    _file->write(data, 128);
-    _bytesTransferred += 128;
-    _io->write(XACK);
-    if (_debug) {
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "ZModemEngine: XMODEM block %d OK", blk);
-        _debug->println(tmp);
+    // Read data
+    uint8_t dataBuf[1024];
+    for (size_t i = 0; i < blockSize; ++i) {
+        int b = _io->read(); if (b == -1) { _io->write(XNAK); return; }
+        dataBuf[i] = (uint8_t)b;
+    }
+
+    // Read checksum/CRC
+    uint16_t receivedCrc = 0;
+    if (_xmodemUseCRC) {
+        int hi = _io->read(); int lo = _io->read();
+        if (hi == -1 || lo == -1) { _io->write(XNAK); return; }
+        receivedCrc = ((uint16_t)hi << 8) | (uint16_t)lo;
+        uint16_t calc = _calcCRC16(dataBuf, blockSize);
+        if (calc != receivedCrc) {
+            // CRC fail -> request resend
+            _io->write(XNAK);
+            // retry/backoff
+            if (_xmodemRetryCount++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+            if (_xmodemRetryInterval == 0) _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
+            _xmodemRetryInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemRetryInterval * 2UL);
+            _xmodemLastSend = millis();
+            return;
+        }
+    } else {
+        int chksum = _io->read(); if (chksum == -1) { _io->write(XNAK); return; }
+        uint8_t sum = 0; for (size_t i = 0; i < blockSize; ++i) sum = (uint8_t)(sum + dataBuf[i]);
+        if (sum != (uint8_t)chksum) {
+            _io->write(XNAK);
+            if (_xmodemRetryCount++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+            if (_xmodemRetryInterval == 0) _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
+            _xmodemRetryInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemRetryInterval * 2UL);
+            _xmodemLastSend = millis();
+            return;
+        }
+    }
+
+    // Block OK: check block number
+    if (blk == _xmodemExpectedBlock) {
+        _file->write(dataBuf, blockSize);
+        _bytesTransferred += blockSize;
+        _io->write(XACK);
+        _xmodemExpectedBlock++;
+        _xmodemRetryCount = 0;
+        _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
+    } else if (blk == (uint8_t)(_xmodemExpectedBlock - 1)) {
+        // duplicate block (sender retransmitted last, maybe ACK lost) -> ack again
+        _io->write(XACK);
+    } else {
+        // unexpected block number
+        _io->write(XNAK);
     }
 }
 
@@ -692,6 +743,15 @@ uint16_t ZModemEngine::_updcrc(uint8_t c, uint16_t crc) {
     for (count = 0; count < 8; count++) {
         if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
         else crc = crc << 1;
+    }
+    return crc;
+}
+
+// Compute 16-bit CRC-CCITT for buffer (compatible with XMODEM-CRC)
+uint16_t ZModemEngine::_calcCRC16(const uint8_t* data, size_t len) {
+    uint16_t crc = 0;
+    for (size_t i = 0; i < len; ++i) {
+        crc = _updcrc(data[i], crc);
     }
     return crc;
 }

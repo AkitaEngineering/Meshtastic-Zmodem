@@ -139,6 +139,14 @@ private:
     // XMODEM compatibility shim
     bool _xmodemEnabled = false;
     void enableXmodemCompatibility(bool enable) { _xmodemEnabled = enable; }
+    // XMODEM runtime state
+    bool _xmodemStarted = false;
+    bool _xmodemUseCRC = true; // prefer CRC mode
+    uint8_t _xmodemExpectedBlock = 1;
+    int _xmodemRetryCount = 0;
+    unsigned long _xmodemLastSend = 0;
+    unsigned long _xmodemRetryInterval = 0;
+    static const int XMODEM_MAX_RETRIES = 8;
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);
