@@ -39,8 +39,17 @@ void ZModemEngine::begin(Stream& ioStream) {
 }
 
 void ZModemEngine::setFileStream(File* file, const String& filename, size_t fileSize) {
+    setFileStream(file, filename.c_str(), fileSize);
+}
+
+void ZModemEngine::setFileStream(File* file, const char* filename, size_t fileSize) {
     _file = file;
-    _filename = filename;
+    if (filename && filename[0]) {
+        strncpy(_filename, filename, FILENAME_MAX_LEN - 1);
+        _filename[FILENAME_MAX_LEN - 1] = '\0';
+    } else {
+        _filename[0] = '\0';
+    }
     _fileSize = fileSize;
     _bytesTransferred = 0;
 }
@@ -183,21 +192,34 @@ void ZModemEngine::_handleSenderLoop() {
              // Send ZFILE Header + Data Subpacket (Filename/Size)
              if (millis() - lastSend > 1000) {
                  _sendBinaryHeader(ZFILE, ZERO_FLAGS);
-                 String fileInfo = _filename;
-                 fileInfo += (char)0;
-                 fileInfo += String(_fileSize);
-                 fileInfo += (char)0;
-
-                 // Safely copy into a bounded buffer and log truncation
+                 // Build filename\0filesize\0 in a bounded payload
                  char payload[128];
-                 size_t len = fileInfo.length();
-                 if (len > 127) {
-                     len = 127;
-                     // copy and ensure termination
+                 payload[0] = '\0';
+                 size_t used = 0;
+                 // copy filename
+                 if (_filename[0]) {
+                     strncpy(payload, _filename, sizeof(payload) - 1);
+                     payload[sizeof(payload) - 1] = '\0';
+                     used = strnlen(payload, sizeof(payload));
                  }
-                 fileInfo.toCharArray(payload, len + 1);
+                 // append NUL and filesize string
+                 if (used + 1 < sizeof(payload)) {
+                     payload[used] = '\0';
+                     used += 1;
+                     // write filesize as ASCII
+                     char sizeStr[32];
+                     snprintf(sizeStr, sizeof(sizeStr), "%lu", (unsigned long)_fileSize);
+                     size_t sizeLen = strnlen(sizeStr, sizeof(sizeStr));
+                     size_t copyLen = ((used + sizeLen + 1) < sizeof(payload)) ? sizeLen : (sizeof(payload) - used - 1);
+                     if (copyLen > 0) {
+                         memcpy(payload + used, sizeStr, copyLen);
+                         used += copyLen;
+                     }
+                     // ensure trailing NUL
+                     if (used < sizeof(payload)) payload[used++] = '\0';
+                 }
 
-                 _sendDataSubpacket((const uint8_t*)payload, len, true); // End frame
+                 _sendDataSubpacket((const uint8_t*)payload, used, true); // End frame
                  lastSend = millis();
              }
              break;
@@ -333,7 +355,9 @@ void ZModemEngine::_handleReceiverLoop() {
                     size_t parsedSize = 0;
                     if (sizeStr && *sizeStr) parsedSize = strtoul(sizeStr, NULL, 10);
 
-                    _filename = String(p);
+                    // Store parsed filename into fixed buffer
+                    strncpy(_filename, p, FILENAME_MAX_LEN - 1);
+                    _filename[FILENAME_MAX_LEN - 1] = '\0';
                     _fileSize = parsedSize;
 
                     // Acknowledge and move to reading actual file data
@@ -366,17 +390,90 @@ void ZModemEngine::_handleReceiverLoop() {
     }
     
     else if (_rState == RSTATE_READ_ZDATA && _file) {
-        // Bulk-read available bytes and write in chunks to avoid per-byte writes.
-        uint8_t buf[128];
+        // Read escaped subpackets, validate CRC, then write payload in bulk.
+        _fillInput();
+
+        // Temporary buffer for unescaped data
+        const size_t SUBBUF_SZ = 512;
+        uint8_t subbuf[SUBBUF_SZ];
+        size_t subidx = 0;
+
         size_t idx = 0;
-        while (_io->available() && idx < sizeof(buf)) {
-            int c = _io->read();
-            if (c == -1) break;
-            buf[idx++] = (uint8_t)c;
+        bool escape = false;
+        while (idx < _inBufLen) {
+            uint8_t b = _inBuf[idx++];
+
+            if (!escape) {
+                if (b == ZDLE) { escape = true; continue; }
+                // normal data byte
+                if (subidx < SUBBUF_SZ) subbuf[subidx++] = b;
+                else { _state = STATE_ERROR; return; }
+            } else {
+                // escaped byte or end-of-subpacket marker
+                escape = false;
+                if (b == ZCRCE || b == ZCRCG || b == ZCRCG) {
+                    // End-of-subpacket marker: need two CRC bytes following
+                    if (idx + 2 > _inBufLen) {
+                        // wait for CRC bytes to arrive
+                        idx -= 1; // push back ZDLE marker handling
+                        break;
+                    }
+
+                    uint8_t crcHigh = _inBuf[idx++];
+                    uint8_t crcLow = _inBuf[idx++];
+                    uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
+
+                    // Compute CRC over unescaped data
+                    uint16_t crc = 0;
+                    for (size_t j = 0; j < subidx; ++j) crc = _updcrc(subbuf[j], crc);
+                    // include the end marker in CRC as sender does
+                    crc = _updcrc(b, crc);
+
+                    if (crc == receivedCrc) {
+                        // Valid subpacket: write to file
+                        if (subidx > 0) {
+                            _file->write(subbuf, subidx);
+                            _bytesTransferred += subidx;
+                        }
+                        // ACK the chunk
+                        _sendHexHeader(ZACK, ZERO_FLAGS);
+                        _lastActivity = millis();
+                        // reset subbuffer
+                        subidx = 0;
+                    } else {
+                        // CRC mismatch: request resend from current offset
+                        uint8_t pos[4];
+                        pos[0] = _bytesTransferred & 0xFF;
+                        pos[1] = (_bytesTransferred >> 8) & 0xFF;
+                        pos[2] = (_bytesTransferred >> 16) & 0xFF;
+                        pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                        _sendHexHeader(ZRPOS, pos);
+                        _lastActivity = millis();
+                        // on CRC error we discard subbuf and continue waiting for resend
+                        subidx = 0;
+                    }
+                    // remove consumed bytes from _inBuf by shifting remaining
+                    if (idx < _inBufLen) {
+                        size_t rem = _inBufLen - idx;
+                        memmove(_inBuf, _inBuf + idx, rem);
+                        _inBufLen = rem;
+                    } else {
+                        _inBufLen = 0;
+                    }
+                    idx = 0; // restart parsing from buffer start
+                    continue;
+                } else {
+                    // Normal escaped data byte
+                    uint8_t orig = b ^ 0x40;
+                    if (subidx < SUBBUF_SZ) subbuf[subidx++] = orig;
+                    else { _state = STATE_ERROR; return; }
+                }
+            }
         }
-        if (idx > 0) {
-            _file->write(buf, idx);
-            _bytesTransferred += idx;
+        // remove any fully consumed bytes at front
+        if (idx > 0 && idx <= _inBufLen) {
+            if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
+            _inBufLen -= idx;
         }
     }
     

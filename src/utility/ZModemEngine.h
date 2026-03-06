@@ -76,6 +76,8 @@ public:
     
     // Set the file storage stream
     void setFileStream(File* file, const String& filename, size_t fileSize);
+    // C-string overload to avoid Arduino String allocations where possible
+    void setFileStream(File* file, const char* filename, size_t fileSize);
     
     // Start operations
     bool send(unsigned long timeout);
@@ -88,7 +90,7 @@ public:
     // Getters
     size_t getBytesTransferred() const { return _bytesTransferred; }
     size_t getFileSize() const { return _fileSize; }
-    String getFilename() const { return _filename; }
+    const char* getFilename() const { return _filename; }
     State getState() const { return _state; }
 
 private:
@@ -96,7 +98,8 @@ private:
     File* _file;
     
     // Transfer context
-    String _filename;
+    static const size_t FILENAME_MAX_LEN = 128;
+    char _filename[FILENAME_MAX_LEN];
     size_t _fileSize;
     size_t _bytesTransferred;
     unsigned long _operationStartTime;

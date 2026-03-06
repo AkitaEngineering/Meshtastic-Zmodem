@@ -122,21 +122,30 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
     // 1. Check for COMMANDS (on the standard text message port for this example)
     if (packet.isValid && packet.decoded.portnum == PortNum_TEXT_MESSAGE_APP && packet.decoded.payload.length() > 0) {
 
-        String msg = packet.decoded.payload.toString();
-        Serial.print("\nReceived Meshtastic Text: '"); Serial.print(msg); Serial.println("'");
+        size_t payloadLen = packet.decoded.payload.length();
+        const uint8_t* payloadBuf = packet.decoded.payload.getBuffer();
+        if (!payloadBuf || payloadLen == 0) return;
+        char* msg = (char*)malloc(payloadLen + 1);
+        if (!msg) return;
+        memcpy(msg, payloadBuf, payloadLen);
+        msg[payloadLen] = '\0';
+
+        char tmpBuf[192];
+        snprintf(tmpBuf, sizeof(tmpBuf), "\nReceived Meshtastic Text: '%s'", msg);
+        Serial.println(tmpBuf);
         Serial.print("From Node: 0x"); Serial.println(packet.from, HEX);
 
-        String command;
-        String args;
-
-        if (msg.startsWith("SEND:")) {
-            command = "SEND";
-            args = msg.substring(5); // e.g., "!a1b2c3d4:/path/file.txt"
-        } else if (msg.startsWith("RECV:")) {
-            command = "RECV";
-            args = msg.substring(5); // e.g., "/path/file.txt"
+        const char* args = NULL;
+        bool isSend = false;
+        if (strncmp(msg, "SEND:", 5) == 0) {
+            isSend = true;
+            args = msg + 5;
+        } else if (strncmp(msg, "RECV:", 5) == 0) {
+            isSend = false;
+            args = msg + 5;
         } else {
             Serial.println("(Not a ZModem command)");
+            free(msg);
             return; // Ignore
         }
 
@@ -148,51 +157,73 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         }
         
         // --- Handle RECV Command ---
-        if (command == "RECV") {
-            String filename = args;
-            if (filename.length() == 0 || !filename.startsWith("/")) {
+        if (!isSend) {
+            const char* filename = args;
+            if (!filename || filename[0] == '\0' || filename[0] != '/') {
                 Serial.println("Invalid RECV format: Filename must be an absolute path (start with '/').");
+                free(msg);
                 return;
             }
 
-            Serial.println("Initiating RECEIVE to file: " + filename);
+            char out[160];
+            snprintf(out, sizeof(out), "Initiating RECEIVE to file: %s", filename);
+            Serial.println(out);
             if (!akitaZmodem.startReceive(filename)) {
                 Serial.println("-> Failed to initiate receive operation.");
             } else {
                  Serial.println("-> Receive operation started. Waiting for sender...");
             }
+            free(msg);
+            return;
+        }
         
         // --- Handle SEND Command ---
-        } else if (command == "SEND") {
-            // Format: SEND:!NodeID:/path/file.txt
-            int idEnd = args.indexOf(':');
-            if (idEnd <= 0) {
-                Serial.println("Invalid SEND format. Use SEND:!NodeID:/path/file.txt");
-                return;
-            }
-
-            String nodeIdStr = args.substring(0, idEnd); // e.g., "!a1b2c3d4"
-            String filename = args.substring(idEnd + 1); // e.g., "/path/file.txt"
-
-            if (filename.length() == 0 || !filename.startsWith("/")) {
-                Serial.println("Invalid SEND format: Filename must be an absolute path (start with '/').");
-                return;
-            }
-
-            // Parse NodeID
-            NodeNum destNodeId = parseNodeId(nodeIdStr.c_str());
-            if (destNodeId == 0 || destNodeId == BROADCAST_ADDR) {
-                Serial.println("Invalid SEND format: Invalid destination NodeID: " + nodeIdStr);
-                return;
-            }
-
-            Serial.println("Initiating SEND for file: " + filename + " to Node 0x" + String(destNodeId, HEX));
-            if (!akitaZmodem.startSend(filename, destNodeId)) {
-                Serial.println("-> Failed to initiate send operation.");
-            } else {
-                 Serial.println("-> Send operation started successfully.");
-            }
+        // --- Handle SEND Command ---
+        // Format: SEND:!NodeID:/path/file.txt
+        const char* colon = strchr(args, ':');
+        if (!colon || colon == args) {
+            Serial.println("Invalid SEND format. Use SEND:!NodeID:/path/file.txt");
+            free(msg);
+            return;
         }
+
+        size_t nodeIdLen = (size_t)(colon - args);
+        if (nodeIdLen == 0 || nodeIdLen >= 32) {
+            Serial.println("Invalid SEND format: NodeID length invalid");
+            free(msg);
+            return;
+        }
+
+        char nodeBuf[40];
+        memcpy(nodeBuf, args, nodeIdLen);
+        nodeBuf[nodeIdLen] = '\0';
+        const char* filename = colon + 1;
+
+        if (!filename || filename[0] == '\0' || filename[0] != '/') {
+            Serial.println("Invalid SEND format: Filename must be an absolute path (start with '/').");
+            free(msg);
+            return;
+        }
+
+        // Parse NodeID
+        NodeNum destNodeId = parseNodeId(nodeBuf);
+        if (destNodeId == 0 || destNodeId == BROADCAST_ADDR) {
+            Serial.print("Invalid SEND format: Invalid destination NodeID: "); Serial.println(nodeBuf);
+            free(msg);
+            return;
+        }
+
+        char out2[192];
+        snprintf(out2, sizeof(out2), "Initiating SEND for file: %s to Node 0x%lX", filename, (unsigned long)destNodeId);
+        Serial.println(out2);
+        if (!akitaZmodem.startSend(filename, destNodeId)) {
+            Serial.println("-> Failed to initiate send operation.");
+        } else {
+             Serial.println("-> Send operation started successfully.");
+        }
+        free(msg);
+        return;
+    }
 
     // 2. Check for DATA (on the dedicated data port)
     } else if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {

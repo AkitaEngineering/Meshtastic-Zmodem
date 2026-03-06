@@ -32,6 +32,9 @@ public:
 
     bool startSend(const String& filePath, NodeNum destinationNodeId);
     bool startReceive(const String& filePath);
+    // Overloads accepting C-strings to avoid caller-side String temporaries
+    bool startSend(const char* filePath, NodeNum destinationNodeId);
+    bool startReceive(const char* filePath);
     void abortTransfer();
 
     TransferState getCurrentState() const;

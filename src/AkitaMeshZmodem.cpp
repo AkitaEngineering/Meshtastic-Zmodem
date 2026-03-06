@@ -193,6 +193,17 @@ bool AkitaMeshZmodem::startReceive(const String& filePath) {
     return false;
 }
 
+// C-string overloads (convenience wrappers to avoid callers allocating Arduino Strings)
+bool AkitaMeshZmodem::startSend(const char* filePath, NodeNum dest) {
+    if (!filePath) return false;
+    return startSend(String(filePath), dest);
+}
+
+bool AkitaMeshZmodem::startReceive(const char* filePath) {
+    if (!filePath) return false;
+    return startReceive(String(filePath));
+}
+
 void AkitaMeshZmodem::abortTransfer() {
     _zmodem.abort();
     _resetTransferState();

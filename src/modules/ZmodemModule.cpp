@@ -14,6 +14,9 @@
 #include "mesh-core.h" // Access to Mesh Core functionalities if needed
 #include "serial-interface.h" // For logging via LOG_INFO/LOG_ERROR etc.
 // #include "utilities.h" // For parseNodeId - not available, define locally
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 // --- Module Initialization ---
 
@@ -82,16 +85,23 @@ bool ZmodemModule::handleReceived(MeshPacket& packet) {
     if (packet.decoded.portnum == AKZ_ZMODEM_COMMAND_PORTNUM) {
         LOG_DEBUG("ZmodemModule received packet on COMMAND PortNum %d", AKZ_ZMODEM_COMMAND_PORTNUM);
 
-        // Expecting text commands (e.g., OPAQUE or TEXT_MESSAGE type)
-        if (packet.decoded.datatype == MeshPacket_DataType_OPAQUE || packet.decoded.datatype == MeshPacket_DataType_TEXT_MESSAGE) {
-             String msg = packet.decoded.payload.toString();
-             LOG_INFO("ZmodemModule received command: '%s' from 0x%x", msg.c_str(), packet.from);
+           // Expecting text commands (e.g., OPAQUE or TEXT_MESSAGE type)
+           if (packet.decoded.datatype == MeshPacket_DataType_OPAQUE || packet.decoded.datatype == MeshPacket_DataType_TEXT_MESSAGE) {
+              // Convert payload bytes to a NUL-terminated C-string (avoid Arduino String allocations)
+              size_t payloadLen = packet.decoded.payload.length();
+              const uint8_t* payloadBuf = packet.decoded.payload.getBuffer();
+              if (payloadLen == 0 || !payloadBuf) return false;
+              char* msg = new char[payloadLen + 1];
+              memcpy(msg, payloadBuf, payloadLen);
+              msg[payloadLen] = '\0';
+              LOG_INFO("ZmodemModule received command: '%s' from 0x%x", msg, packet.from);
 
-             // Handle the command
-             handleCommand(msg, packet.from);
+              // Handle the command
+              handleCommand(msg, packet.from);
+              delete[] msg;
 
-             return true; // Packet was processed by this module
-        } else {
+              return true; // Packet was processed by this module
+           } else {
              LOG_DEBUG("ZmodemModule ignoring non-text packet on COMMAND PortNum %d", AKZ_ZMODEM_COMMAND_PORTNUM);
              return false; // Let other modules or default handling take it
         }
@@ -118,98 +128,116 @@ bool ZmodemModule::handleReceived(MeshPacket& packet) {
 // --- Private Helper Methods ---
 
 // Parse and handle incoming commands (SEND:!NodeID:/path, RECV:/path)
-void ZmodemModule::handleCommand(const String& msg, NodeNum fromNodeId) {
-    String command;
-    String args;
+void ZmodemModule::handleCommand(const char* msg, NodeNum fromNodeId) {
+    if (!msg) return;
 
-    // Basic parsing (case-sensitive)
-    if (msg.startsWith("SEND:")) {
-        command = "SEND";
-        args = msg.substring(5); // e.g., "!a1b2c3d4:/path/file.txt"
-    } else if (msg.startsWith("RECV:")) {
-        command = "RECV";
-        args = msg.substring(5); // e.g., "/path/file.txt"
+    const char* args = nullptr;
+    bool isSend = false;
+    if (strncmp(msg, "SEND:", 5) == 0) {
+        isSend = true;
+        args = msg + 5; // after SEND:
+    } else if (strncmp(msg, "RECV:", 5) == 0) {
+        isSend = false;
+        args = msg + 5; // after RECV:
     } else {
-        LOG_WARNING("ZmodemModule: Received unknown command '%s'", msg.c_str());
-        sendReply("Unknown command: " + msg, fromNodeId);
+        LOG_WARNING("ZmodemModule: Received unknown command '%s'", msg);
+        char buf[192];
+        snprintf(buf, sizeof(buf), "Unknown command: %s", msg);
+        sendReply(buf, fromNodeId);
         return;
     }
 
     // Check if a transfer is already active
     if (akitaZmodem.getCurrentState() != AkitaMeshZmodem::TransferState::IDLE) {
-        LOG_WARNING("ZmodemModule: Ignoring command '%s', transfer already in progress.", msg.c_str());
-        sendReply("Error: Transfer already in progress (State: " + String((int)akitaZmodem.getCurrentState()) + ")", fromNodeId);
+        LOG_WARNING("ZmodemModule: Ignoring command '%s', transfer already in progress.", msg);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Error: Transfer already in progress (State: %d)", (int)akitaZmodem.getCurrentState());
+        sendReply(buf, fromNodeId);
         return;
     }
 
-    // --- Execute RECV command ---
-    if (command == "RECV") {
-        String filename = args;
-        // Validate filename (must be absolute path)
-        if (filename.length() == 0 || !filename.startsWith("/")) {
-            LOG_ERROR("ZmodemModule: Invalid RECV filename format: '%s'", filename.c_str());
+    if (!isSend) {
+        // RECV: args is filename
+        const char* filename = args;
+        if (!filename || filename[0] == '\0' || filename[0] != '/') {
+            LOG_ERROR("ZmodemModule: Invalid RECV filename format: '%s'", filename ? filename : "(null)");
             sendReply("Error: Invalid RECV format. Use RECV:/path/to/save.txt", fromNodeId);
             return;
         }
 
-        LOG_INFO("ZmodemModule: Initiating RECEIVE to '%s'", filename.c_str());
+        LOG_INFO("ZmodemModule: Initiating RECEIVE to '%s'", filename);
         bool success = akitaZmodem.startReceive(filename);
-         if (success) {
-            sendReply("OK: Starting RECV to " + filename + ". Waiting for sender...", fromNodeId);
+        if (success) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "OK: Starting RECV to %s. Waiting for sender...", filename);
+            sendReply(buf, fromNodeId);
         } else {
-            sendReply("Error: Failed to start RECV to " + filename, fromNodeId);
-            LOG_ERROR("ZmodemModule: akitaZmodem.startReceive failed for '%s'", filename.c_str());
+            char buf[160];
+            snprintf(buf, sizeof(buf), "Error: Failed to start RECV to %s", filename);
+            sendReply(buf, fromNodeId);
+            LOG_ERROR("ZmodemModule: akitaZmodem.startReceive failed for '%s'", filename);
         }
 
-    // --- Execute SEND command ---
-    } else if (command == "SEND") {
-        // New format: SEND:!NodeID:/path/file.txt
-        int idEnd = args.indexOf(':');
-        if (idEnd <= 0) {
-            LOG_ERROR("ZmodemModule: Invalid SEND format. No ':' separator for NodeID. Got: '%s'", args.c_str());
+    } else {
+        // SEND: args format: !NodeID:/path/file.txt
+        const char* colon = strchr(args, ':');
+        if (!colon || colon == args) {
+            LOG_ERROR("ZmodemModule: Invalid SEND format. No ':' separator for NodeID. Got: '%s'", args ? args : "(null)");
             sendReply("Error: Invalid SEND format. Use SEND:!NodeID:/path/file.txt", fromNodeId);
             return;
         }
 
-        String nodeIdStr = args.substring(0, idEnd); // e.g., "!a1b2c3d4"
-        String filename = args.substring(idEnd + 1); // e.g., "/path/file.txt"
+        size_t nodeIdLen = (size_t)(colon - args);
+        if (nodeIdLen == 0 || nodeIdLen >= 32) {
+            sendReply("Error: Invalid SEND NodeID length", fromNodeId);
+            return;
+        }
 
-        // Validate filename
-        if (filename.length() == 0 || !filename.startsWith("/")) {
-            LOG_ERROR("ZmodemModule: Invalid SEND filename format: '%s'", filename.c_str());
+        char nodeBuf[40];
+        memcpy(nodeBuf, args, nodeIdLen);
+        nodeBuf[nodeIdLen] = '\0';
+        const char* filename = colon + 1;
+
+        if (!filename || filename[0] == '\0' || filename[0] != '/') {
+            LOG_ERROR("ZmodemModule: Invalid SEND filename format: '%s'", filename ? filename : "(null)");
             sendReply("Error: Invalid SEND filename format. Must start with '/'.", fromNodeId);
             return;
         }
 
-        // Parse NodeID
-        NodeNum destNodeId = parseNodeId(nodeIdStr.c_str());
+        NodeNum destNodeId = parseNodeId(nodeBuf);
         if (destNodeId == 0 || destNodeId == BROADCAST_ADDR) {
-             LOG_ERROR("ZmodemModule: Invalid SEND destination NodeID: '%s'", nodeIdStr.c_str());
-            sendReply("Error: Invalid SEND destination NodeID: " + nodeIdStr, fromNodeId);
+            LOG_ERROR("ZmodemModule: Invalid SEND destination NodeID: '%s'", nodeBuf);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "Error: Invalid SEND destination NodeID: %s", nodeBuf);
+            sendReply(buf, fromNodeId);
             return;
         }
-        
-        // Execute the command
-        LOG_INFO("ZmodemModule: Initiating SEND for '%s' to Node 0x%x", filename.c_str(), destNodeId);
+
+        LOG_INFO("ZmodemModule: Initiating SEND for '%s' to Node 0x%x", filename, destNodeId);
         bool success = akitaZmodem.startSend(filename, destNodeId);
         if (success) {
-            sendReply("OK: Starting SEND for " + filename + " to " + nodeIdStr, fromNodeId);
+            char buf[192];
+            snprintf(buf, sizeof(buf), "OK: Starting SEND for %s to %s", filename, nodeBuf);
+            sendReply(buf, fromNodeId);
         } else {
-            sendReply("Error: Failed to start SEND for " + filename, fromNodeId);
-            LOG_ERROR("ZmodemModule: akitaZmodem.startSend failed for '%s'", filename.c_str());
+            char buf[160];
+            snprintf(buf, sizeof(buf), "Error: Failed to start SEND for %s", filename);
+            sendReply(buf, fromNodeId);
+            LOG_ERROR("ZmodemModule: akitaZmodem.startSend failed for '%s'", filename);
         }
     }
 }
 
 // Send a reply text message back to the sender
-void ZmodemModule::sendReply(const String& message, NodeNum destinationNodeId) {
-    LOG_DEBUG("Sending reply to 0x%x: %s", destinationNodeId, message.c_str());
+void ZmodemModule::sendReply(const char* message, NodeNum destinationNodeId) {
+    if (!message) return;
+    LOG_DEBUG("Sending reply to 0x%x: %s", destinationNodeId, message);
 
     // Create a MeshPacket for the reply
     MeshPacket replyPacket;
     replyPacket.set_to(destinationNodeId);
     replyPacket.set_from(mesh.getNodeNum()); // Set source as this node
-    replyPacket.set_payload((const uint8_t*)message.c_str(), message.length());
+    replyPacket.set_payload((const uint8_t*)message, (size_t)strlen(message));
     replyPacket.set_portnum(AKZ_ZMODEM_COMMAND_PORTNUM); // Send reply on the COMMAND port
     replyPacket.set_datatype(MeshPacket_DataType_TEXT_MESSAGE); // Mark as text
     replyPacket.set_want_ack(false); // Replies usually don't need ACK

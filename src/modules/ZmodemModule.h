@@ -56,12 +56,12 @@ private:
      * @param msg The command string.
      * @param fromNodeId The Node ID of the sender.
      */
-    void handleCommand(const String& msg, NodeNum fromNodeId);
+    void handleCommand(const char* msg, NodeNum fromNodeId);
 
     /**
      * @brief Helper to send a reply text message back to the command sender.
      * @param message The text message to send.
      * @param destinationNodeId The Node ID to send the reply to.
      */
-    void sendReply(const String& message, NodeNum destinationNodeId);
+    void sendReply(const char* message, NodeNum destinationNodeId);
 };
