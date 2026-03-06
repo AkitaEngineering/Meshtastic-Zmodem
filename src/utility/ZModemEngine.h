@@ -147,6 +147,12 @@ private:
     unsigned long _xmodemLastSend = 0;
     unsigned long _xmodemRetryInterval = 0;
     static const int XMODEM_MAX_RETRIES = 8;
+    // XMODEM sender state
+    bool _xmodemSendStarted = false;
+    uint8_t _xmodemSendBlock = 1;
+    int _xmodemSendRetry = 0;
+    unsigned long _xmodemSendLast = 0;
+    unsigned long _xmodemSendInterval = 0;
     
     // CRC Helpers
     uint16_t _calcCRC16(const uint8_t* data, size_t len);

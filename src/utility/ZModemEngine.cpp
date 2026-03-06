@@ -140,6 +140,11 @@ int ZModemEngine::loop() {
 
 // --- Sender Logic ---
 void ZModemEngine::_handleSenderLoop() {
+    // If XMODEM compatibility is enabled, prefer using the XMODEM sender fallback
+    if (_xmodemEnabled && _isSender) {
+        _handleXmodemSender();
+        return;
+    }
     static unsigned long lastSend = 0;
     uint8_t rxType;
     uint8_t rxFlags[4];
@@ -668,6 +673,134 @@ void ZModemEngine::_handleXmodemReceiver() {
         // unexpected block number
         _io->write(XNAK);
     }
+}
+
+// XMODEM sender implementation (CRC-mode preferred). Non-blocking.
+void ZModemEngine::_handleXmodemSender() {
+    if (!_io || !_file) return;
+
+    // Wait for receiver request ('C' for CRC or NAK for checksum)
+    if (!_xmodemSendStarted) {
+        if (_io->available()) {
+            int b = _io->read();
+            if (b == 'C' || b == 'c') {
+                _xmodemUseCRC = true;
+                _xmodemSendStarted = true;
+                _xmodemSendBlock = 1;
+                _xmodemSendRetry = 0;
+                _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+                _xmodemSendLast = 0;
+            } else if (b == XNAK) {
+                _xmodemUseCRC = false;
+                _xmodemSendStarted = true;
+                _xmodemSendBlock = 1;
+                _xmodemSendRetry = 0;
+                _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+                _xmodemSendLast = 0;
+            } else {
+                // ignore other bytes
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+
+    // If currently waiting for ACK/NAK for last block, check for responses or timeout
+    if (_xmodemSendLast != 0 && (millis() - _xmodemSendLast) < _xmodemSendInterval) {
+        // check for ACK/NAK
+        if (_io->available()) {
+            int r = _io->read();
+            if (r == XACK) {
+                // success, advance block
+                _xmodemSendBlock++;
+                _xmodemSendLast = 0;
+                _xmodemSendRetry = 0;
+                _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+            } else if (r == XNAK) {
+                // resend last block
+                if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+                _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
+                _xmodemSendLast = 0; // trigger resend below
+            } else if (r == XCAN) {
+                _state = STATE_ERROR; return;
+            } else {
+                // ignore
+            }
+        }
+        return;
+    }
+
+    // Send next block if any
+    if (_file && !_file->available() && _bytesTransferred < _fileSize) {
+        // Ensure file pointer is at correct offset
+        _file->seek(_bytesTransferred);
+    }
+
+    if (_bytesTransferred >= _fileSize) {
+        // No more data: send EOT and wait for ACK
+        if (_xmodemSendLast == 0) {
+            _io->write(XEOT);
+            _xmodemSendLast = millis();
+            _xmodemSendRetry = 0;
+            _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+            return;
+        } else {
+            // waiting for ACK for EOT
+            if (_io->available()) {
+                int r = _io->read();
+                if (r == XACK) {
+                    _state = STATE_COMPLETE;
+                    return;
+                } else if (r == XNAK) {
+                    if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+                    _xmodemSendLast = 0; // resend EOT
+                    _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
+                    return;
+                }
+            }
+            // timeout handling
+            if (millis() - _xmodemSendLast >= _xmodemSendInterval) {
+                if (_xmodemSendRetry++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
+                _xmodemSendLast = 0; // resend
+                _xmodemSendInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemSendInterval * 2UL);
+            }
+            return;
+    }
+
+    // Prepare block
+    uint8_t block[128];
+    size_t toRead = 128;
+    size_t readLen = 0;
+    if (_file) {
+        readLen = _file->read(block, 128);
+    } else {
+        readLen = 0;
+    }
+    if (readLen < 128) {
+        // pad with CTRL-Z
+        for (size_t i = readLen; i < 128; ++i) block[i] = 0x1A;
+    }
+
+    // Send SOH, blk, ~blk, data, CRC
+    _io->write(XSOH);
+    _io->write(_xmodemSendBlock);
+    _io->write(255 - _xmodemSendBlock);
+    _io->write(block, 128);
+    if (_xmodemUseCRC) {
+        uint16_t crc = _calcCRC16(block, 128);
+        _io->write((crc >> 8) & 0xFF);
+        _io->write(crc & 0xFF);
+    } else {
+        uint8_t sum = 0; for (int i = 0; i < 128; ++i) sum = (uint8_t)(sum + block[i]);
+        _io->write(sum);
+    }
+
+    _xmodemSendLast = millis();
+    _xmodemSendRetry = 0;
+    _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+    // advance bytesTransferred immediately (we will retransmit cached data if needed)
+    _bytesTransferred += readLen;
 }
 
 
