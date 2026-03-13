@@ -223,7 +223,6 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         }
         free(msg);
         return;
-    }
 
     // 2. Check for DATA (on the dedicated data port)
     } else if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {

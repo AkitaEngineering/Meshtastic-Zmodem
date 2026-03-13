@@ -113,7 +113,10 @@ private:
     
     // Buffers
     uint8_t _txBuffer[256]; // Small chunk size for LoRa
-    uint16_t _bufferIdx;
+
+    // Sender/receiver timing (replaces function-static variables)
+    unsigned long _senderLastSend;
+    unsigned long _receiverLastAck;
 
     // Retransmit / backoff state
     uint8_t _lastDataBuf[256];

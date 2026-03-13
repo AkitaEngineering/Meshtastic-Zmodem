@@ -1,9 +1,12 @@
 #ifndef GLOBALS_H
 #define GLOBALS_H
 
-// stubbed globals for build; real project defines mesh and filesystem objects
 #include <FS.h>
-// SPIFFS is a filesystem instance in the real SDK; stub it as a null reference
-#define SPIFFS (*(FS*)nullptr)
+#include <SPIFFS.h>
+
+// Global objects expected by ZmodemModule (provided by Meshtastic firmware at runtime).
+// Declared as extern references for standalone library compilation.
+extern FS& Filesystem;
+extern Stream& Log;
 
 #endif // GLOBALS_H

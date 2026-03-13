@@ -18,6 +18,9 @@
 #include <cstdio>
 #include <cstdlib>
 
+// Forward declaration of helper defined at end of file
+static NodeNum parseNodeId(const char* str);
+
 // --- Module Initialization ---
 
 // Constructor
@@ -28,13 +31,6 @@ ZmodemModule::ZmodemModule(MeshInterface& mesh) : Module(mesh) {
 // Setup: Called once during firmware boot
 void ZmodemModule::setup() {
     LOG_INFO("Initializing Zmodem Module...");
-
-    // Check if filesystem is available (should be initialized by firmware core)
-    // Use the global 'Filesystem' object from Meshtastic
-    if (!Filesystem.begin()) { 
-        LOG_ERROR("ZmodemModule: Filesystem not available or failed to initialize! Module disabled.");
-        return;
-    }
 
     // Initialize the Akita ZModem library instance
     // Pass the global 'mesh' instance, the global 'Filesystem', and the global 'Log' stream for debugging
@@ -255,7 +251,7 @@ void ZmodemModule::sendReply(const char* message, NodeNum destinationNodeId) {
  * @param str The string to parse.
  * @return NodeNum The parsed ID, or 0 on error.
  */
-NodeNum parseNodeId(const char* str) {
+static NodeNum parseNodeId(const char* str) {
     if (!str || str[0] == '\0') return 0;
     const char* idStr = str;
     if (str[0] == '!') {

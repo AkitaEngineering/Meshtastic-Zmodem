@@ -243,14 +243,12 @@ void AkitaMeshZmodem::_handleZmodemState(int zState) {
         case ZModemEngine::STATE_SEND_ZRQINIT:
         case ZModemEngine::STATE_SEND_ZFILE:
         case ZModemEngine::STATE_SEND_ZDATA:
-            _currentState = TransferState::SENDING;
-            break;
-
+        case ZModemEngine::STATE_SEND_ZEOF:
+        case ZModemEngine::STATE_SEND_ZFIN:
         case ZModemEngine::STATE_AWAIT_ZRINIT:
         case ZModemEngine::STATE_AWAIT_ZRPOS:
         case ZModemEngine::STATE_AWAIT_ZFIN:
-        case ZModemEngine::STATE_SEND_ZFIN:
-            _currentState = TransferState::RECEIVING;
+            _currentState = TransferState::SENDING;
             break;
 
         default:

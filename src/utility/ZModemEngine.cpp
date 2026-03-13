@@ -9,8 +9,9 @@
 #include "ZModemEngine.h"
 
 // ZModem Control Frame End (CRCE is final, CRCG/CRCW are intermediate)
-#define ZCRCG 0x47
 #define ZCRCE 0x45
+#define ZCRCG 0x47
+#define ZCRCW 0x48
 
 // Helper constants
 const uint8_t ZERO_FLAGS[4] = {0, 0, 0, 0};
@@ -28,6 +29,10 @@ ZModemEngine::ZModemEngine() {
     _fileInfoIndex = 0;
     _fileInfoEscape = false;
     _fileInfoAwaitingCRC = false;
+
+    // Sender/receiver timing (instance vars instead of function-local statics)
+    _senderLastSend = 0;
+    _receiverLastAck = 0;
 
     // Retransmit state
     _lastDataLen = 0;
@@ -149,7 +154,6 @@ void ZModemEngine::_handleSenderLoop() {
         _handleXmodemSender();
         return;
     }
-    static unsigned long lastSend = 0;
     uint8_t rxType;
     uint8_t rxFlags[4];
     
@@ -218,15 +222,15 @@ void ZModemEngine::_handleSenderLoop() {
     // Sending Actions (Retry every 1 second if stuck on a state waiting for remote action)
     switch(_state) {
         case STATE_SEND_ZRQINIT:
-            if (millis() - lastSend > 1000) { 
+            if (millis() - _senderLastSend > 1000) { 
                 _sendHexHeader(ZRQINIT, ZERO_FLAGS);
-                lastSend = millis();
+                _senderLastSend = millis();
             }
             break;
 
         case STATE_SEND_ZFILE:
              // Send ZFILE Header + Data Subpacket (Filename/Size)
-             if (millis() - lastSend > 1000) {
+             if (millis() - _senderLastSend > 1000) {
                  _sendBinaryHeader(ZFILE, ZERO_FLAGS);
                  // Build filename\0filesize\0 in a bounded payload
                  char payload[128];
@@ -256,7 +260,7 @@ void ZModemEngine::_handleSenderLoop() {
                  }
 
                  _sendDataSubpacket((const uint8_t*)payload, used, true); // End frame
-                 lastSend = millis();
+                 _senderLastSend = millis();
              }
              break;
 
@@ -315,21 +319,21 @@ void ZModemEngine::_handleSenderLoop() {
             break;
              
         case STATE_SEND_ZEOF:
-             if (millis() - lastSend > 1000) {
+             if (millis() - _senderLastSend > 1000) {
                  uint8_t pos[4];
                  pos[0] = _bytesTransferred & 0xFF;
                  pos[1] = (_bytesTransferred >> 8) & 0xFF;
                  pos[2] = (_bytesTransferred >> 16) & 0xFF;
                  pos[3] = (_bytesTransferred >> 24) & 0xFF;
                  _sendHexHeader(ZEOF, pos);
-                 lastSend = millis();
+                 _senderLastSend = millis();
              }
              break;
 
         case STATE_SEND_ZFIN:
-             if (millis() - lastSend > 1000) {
+             if (millis() - _senderLastSend > 1000) {
                  _sendHexHeader(ZFIN, ZERO_FLAGS);
-                 lastSend = millis();
+                 _senderLastSend = millis();
              }
              break;
         default:
@@ -340,7 +344,6 @@ void ZModemEngine::_handleSenderLoop() {
 
 // --- Receiver Logic ---
 void ZModemEngine::_handleReceiverLoop() {
-    static unsigned long lastAck = 0;
     uint8_t rxType;
     uint8_t rxFlags[4];
     
@@ -403,7 +406,7 @@ void ZModemEngine::_handleReceiverLoop() {
                 else { _state = STATE_ERROR; return; }
             } else {
                 _fileInfoEscape = false;
-                if (b == ZCRCE || b == ZCRCG) {
+                if (b == ZCRCE || b == ZCRCG || b == ZCRCW) {
                     // End-of-subpacket. Need two CRC bytes; ensure they are in _inBuf
                     if (idx + 2 > _inBufLen) {
                         // not enough bytes yet; roll back idx and wait
@@ -477,7 +480,7 @@ void ZModemEngine::_handleReceiverLoop() {
             } else {
                 // escaped byte or end-of-subpacket marker
                 escape = false;
-                if (b == ZCRCE || b == ZCRCG || b == ZCRCG) {
+                if (b == ZCRCE || b == ZCRCG || b == ZCRCW) {
                     // End-of-subpacket marker: need two CRC bytes following
                     if (idx + 2 > _inBufLen) {
                         // wait for CRC bytes to arrive
@@ -544,9 +547,9 @@ void ZModemEngine::_handleReceiverLoop() {
     }
     
     // Keepalive (If waiting for sender to act)
-    if (millis() - lastAck > 3000 && _state != STATE_COMPLETE && _state != STATE_ERROR) {
+    if (millis() - _receiverLastAck > 3000 && _state != STATE_COMPLETE && _state != STATE_ERROR) {
         _sendHexHeader(ZRINIT, ZERO_FLAGS); // Keep poking sender
-        lastAck = millis();
+        _receiverLastAck = millis();
     }
 
     // If XMODEM compatibility enabled and we haven't entered ZMODEM transfer after some time,
@@ -858,14 +861,24 @@ void ZModemEngine::_sendBinaryHeader(uint8_t type, const uint8_t* flags) {
     uint16_t crc = 0;
     _io->write(ZPAD); _io->write(ZDLE); _io->write(ZBIN);
     
-    _io->write(type); crc = _updcrc(type, crc);
-    _io->write(flags[0]); crc = _updcrc(flags[0], crc);
-    _io->write(flags[1]); crc = _updcrc(flags[1], crc);
-    _io->write(flags[2]); crc = _updcrc(flags[2], crc);
-    _io->write(flags[3]); crc = _updcrc(flags[3], crc);
+    // ZDLE-escape helper: writes byte with escaping for control chars
+    auto zdleWrite = [&](uint8_t b) {
+        if (b == ZDLE || b == 0x10 || b == 0x11 || b == 0x13 || (b & 0x7F) == 0x0D) {
+            _io->write(ZDLE);
+            _io->write((uint8_t)(b ^ 0x40));
+        } else {
+            _io->write(b);
+        }
+    };
     
-    _io->write((crc >> 8) & 0xFF);
-    _io->write(crc & 0xFF);
+    crc = _updcrc(type, crc);       zdleWrite(type);
+    crc = _updcrc(flags[0], crc);   zdleWrite(flags[0]);
+    crc = _updcrc(flags[1], crc);   zdleWrite(flags[1]);
+    crc = _updcrc(flags[2], crc);   zdleWrite(flags[2]);
+    crc = _updcrc(flags[3], crc);   zdleWrite(flags[3]);
+    
+    zdleWrite((crc >> 8) & 0xFF);
+    zdleWrite(crc & 0xFF);
 }
 
 void ZModemEngine::_sendDataSubpacket(const uint8_t* data, size_t len, bool endFrame) {
@@ -921,12 +934,18 @@ int ZModemEngine::_readHexHeader(uint8_t& type, uint8_t* flags) {
 
     _fillInput();
 
+    // Scan forward to find the header start sequence (ZPAD ZPAD ZDLE ZHEX),
+    // discarding any leading garbage (e.g. XON bytes, CR/LF from previous frames).
+    while (_inBufLen >= 4) {
+        if (_inBuf[0] == ZPAD && _inBuf[1] == ZPAD && _inBuf[2] == ZDLE && _inBuf[3] == ZHEX)
+            break;
+        memmove(_inBuf, _inBuf + 1, _inBufLen - 1);
+        _inBufLen--;
+    }
+
     // Minimum expected header length: 4 control bytes + 2(type) + 8(flags) + 4(crc) + 2(CRLF) = 20
     const size_t MIN_HDR_LEN = 20;
     if (_inBufLen < MIN_HDR_LEN) return 0;
-
-    // Look for header start at buffer start
-    if (!(_inBuf[0] == ZPAD && _inBuf[1] == ZPAD && _inBuf[2] == ZDLE && _inBuf[3] == ZHEX)) return 0;
 
     // Ensure we have all ascii hex characters following
     // ascii hex digits start at index 4 and span 16 bytes (2 + 8 + 4 + 2)
