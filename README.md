@@ -99,3 +99,12 @@ only stubbed versions of the Meshtastic and StreamUtils libraries (see
 when the real dependencies are not available.  To perform a full build the
 real Meshtastic package from the Arduino registry is required.
 
+## Documentation updates (recent)
+
+- Fixed several protocol/parser bugs in the internal ZModem engine (`src/utility/ZModemEngine.cpp`) including proper ZDLE-escaping and header scanning for robustness over noisy links.
+- Resolved incorrect TransferState mappings and stream-handling issues in the library wrapper (`src/AkitaMeshZmodem.cpp`).
+- The example sketch `examples/Basic_Transfer/Basic_Transfer.ino` was corrected for proper packet handling and command parsing.
+- Stub headers and library stubs were improved so the library can be compiled and verified with PlatformIO even when the full Meshtastic firmware is not present.
+
+These fixes were verified by building the project with PlatformIO on ESP32 (`env: esp32dev`). See the quick build steps in `USAGE.md`.
+

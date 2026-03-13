@@ -34,3 +34,21 @@ This document supplements `README.md` with detailed usage examples and troublesh
 
 - Tune `_zmodemTimeout` via `setTimeout()` for networks with high latency.
 - Use `setProgressUpdateInterval()` to control periodic progress logs.
+
+## Quick build & verification
+
+Build the library and example with PlatformIO (ESP32 dev board environment):
+
+```bash
+pio run -e esp32dev
+```
+
+To build the example sketch using the Arduino IDE, open `examples/Basic_Transfer/Basic_Transfer.ino` and compile/upload as usual.
+
+If you're integrating into Meshtastic firmware, copy the module into the firmware `src/modules/` and rebuild the full firmware with PlatformIO.
+
+## Notes
+
+- The `AKZ_ZMODEM_COMMAND_PORTNUM` (default `250`) is used for text commands (`SEND:`/`RECV:`).
+- The `AKZ_ZMODEM_DATA_PORTNUM` (default `251`) is used for the binary ZModem transfer packets.
+- When troubleshooting, enable a `Stream` (e.g., `Serial`) in `begin()` for debug logs.
