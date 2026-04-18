@@ -47,14 +47,40 @@ License: GNU GPLv3 — see `LICENSE`.
 
 This is the preferred method for running file transfers as a service and requires building the Meshtastic firmware from source using PlatformIO.
 
-1.  **Prepare Files:** Copy the files from the `src/` directory into a library folder (`lib/Akita_Meshtastic_Zmodem`) within the Meshtastic firmware source tree.
-2.  **Install Module:** Copy `src/modules/ZmodemModule.h` and `src/modules/ZmodemModule.cpp` into the Meshtastic firmware's `src/modules/` directory.
-3.  **Register Module:** Edit the main firmware file (`src/mesh-core.cpp` or similar) to include the module header and instantiate the module, allowing it to hook into the main loop:
+1.  **Create the library folder:** Inside your Meshtastic firmware checkout, create a library folder that preserves the same relative include layout used by this repository:
+    ```text
+    lib/Akita_Meshtastic_Zmodem/src/
+    lib/Akita_Meshtastic_Zmodem/src/utility/
+    ```
+2.  **Copy only the runtime library files:** Copy these files into that folder:
+    ```text
+    src/AkitaMeshZmodem.h
+    src/AkitaMeshZmodem.cpp
+    src/AkitaMeshZmodemConfig.h
+    src/utility/ZModemEngine.h
+    src/utility/ZModemEngine.cpp
+    ```
+    Keep the `utility/` subdirectory intact so includes such as `utility/ZModemEngine.h` continue to resolve.
+3.  **Do not copy the standalone stub files:** These files exist in this repository only to let the library compile outside the full Meshtastic firmware tree and should not overwrite firmware-provided headers:
+    ```text
+    src/main.cpp
+    src/globals.h
+    src/module.h
+    src/mesh-core.h
+    src/serial-interface.h
+    ```
+4.  **Install the Meshtastic module:** Copy `src/modules/ZmodemModule.h` and `src/modules/ZmodemModule.cpp` into the Meshtastic firmware's `src/modules/` directory.
+5.  **Register the module:** Edit the main firmware file (`src/mesh-core.cpp` or similar) to include the module header and instantiate the module, allowing it to hook into the main loop:
     ```cpp
     #include "modules/ZmodemModule.h"
     // ...
     modules.push_back(new ZmodemModule(*this));
     ```
+6.  **Confirm firmware-side prerequisites:**
+    - The real Meshtastic firmware must provide `Filesystem`, `Log`, `Module`, `MeshInterface`, and the packet delivery path used by `handleReceived()`.
+    - The filesystem must be mounted before `ZmodemModule::setup()` runs.
+    - `AKZ_ZMODEM_COMMAND_PORTNUM` and `AKZ_ZMODEM_DATA_PORTNUM` must not collide with any other application ports in your firmware build.
+7.  **If you integrate the library without `ZmodemModule`:** Forward all packets received on `AKZ_ZMODEM_DATA_PORTNUM` to `akitaZmodem.processDataPacket(packet)` during any active transfer. The sender also depends on responses received on the data port.
 
 ## Usage
 
@@ -73,7 +99,7 @@ When integrating into custom code:
 
 * `begin(mesh, Filesystem, &Serial)`: Initialize the engine and set up the transport streams.
 * `loop()`: Must be called continuously in your main loop to process the ZModem state machine.
-* `processDataPacket(MeshPacket& packet)`: **CRITICAL.** This method is used to push raw data packets received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) directly into the ZModem engine's input buffer.
+* `processDataPacket(MeshPacket& packet)`: **CRITICAL.** Forward every packet received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) while a transfer is active. The sender needs control responses on this port just as much as the receiver needs file data.
 
 
 ## Additional tools and testing
@@ -82,14 +108,14 @@ Two helper scripts have been added under `tools/` to simplify exercising the
 module on a host machine:
 
 * `serial_proxy.py` – creates a PTY and proxies it to a real serial device.
-  Run your host-side XMODEM/SZ/SX tool against the PTY to talk to the board.
+    Run your host-side serial tool against the PTY to talk to the board.
+    Requires `python3` and `pyserial`.
 * `auto_xmodem_test.py` – automation harness that invokes `sz --xmodem` and
-  validates the received file.  Useful for CI or sanity checks without
-  hardware.
+    validates the received file. Requires `python3` and `sz` from `lrzsz`.
 
-The internal ZModem engine now includes **XMODEM compatibility** (CRC or
-checksum), automatic retransmit/backoff, and a cached‑block sender mode to
-avoid file seeks on retry.
+These tools are for local protocol experimentation only. The default library
+and module flow documented in this repository is the Meshtastic ZModem path
+driven by `SEND:` and `RECV:` commands over the command and data ports.
 
 ### Building without Meshtastic
 
@@ -102,9 +128,10 @@ real Meshtastic package from the Arduino registry is required.
 ## Documentation updates (recent)
 
 - Fixed several protocol/parser bugs in the internal ZModem engine (`src/utility/ZModemEngine.cpp`) including proper ZDLE-escaping and header scanning for robustness over noisy links.
-- Resolved incorrect TransferState mappings and stream-handling issues in the library wrapper (`src/AkitaMeshZmodem.cpp`).
-- The example sketch `examples/Basic_Transfer/Basic_Transfer.ino` was corrected for proper packet handling and command parsing.
+- Resolved stream-handling issues in the library wrapper (`src/AkitaMeshZmodem.cpp`), including buffering multiple data-port packets while the engine drains the stream.
+- Corrected the module and example integration so packets on the data port are forwarded during both send and receive operations.
+- The example sketch `examples/Basic_Transfer/Basic_Transfer.ino` was corrected for proper packet handling, command parsing, and transfer-state cleanup.
 - Stub headers and library stubs were improved so the library can be compiled and verified with PlatformIO even when the full Meshtastic firmware is not present.
 
-These fixes were verified by building the project with PlatformIO on ESP32 (`env: esp32dev`). See the quick build steps in `USAGE.md`.
+These fixes were verified by building the project with PlatformIO on ESP32 (`env: esp32dev`). End-to-end radio validation on real Meshtastic nodes is still recommended before treating the transfer path as field-proven. See the quick build steps in `USAGE.md`.
 
