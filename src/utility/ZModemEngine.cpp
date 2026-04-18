@@ -29,6 +29,11 @@ ZModemEngine::ZModemEngine() {
     _fileInfoIndex = 0;
     _fileInfoEscape = false;
     _fileInfoAwaitingCRC = false;
+    _fileInfoFrameEnd = 0;
+    _dataSubpacketLen = 0;
+    _dataSubpacketEscape = false;
+    _dataSubpacketAwaitingCRC = false;
+    _dataSubpacketFrameEnd = 0;
 
     // Sender/receiver timing (instance vars instead of function-local statics)
     _senderLastSend = 0;
@@ -75,10 +80,30 @@ bool ZModemEngine::send(unsigned long timeout) {
     if (!_io || !_file) return false;
     _isSender = true;
     _state = STATE_SEND_ZRQINIT;
+    _rState = RSTATE_IDLE;
     _timeoutMs = timeout;
     _operationStartTime = millis();
     _lastActivity = millis();
     _retryCount = 0;
+    _inBufLen = 0;
+    _fileInfoIndex = 0;
+    _fileInfoEscape = false;
+    _fileInfoAwaitingCRC = false;
+    _fileInfoFrameEnd = 0;
+    _dataSubpacketLen = 0;
+    _dataSubpacketEscape = false;
+    _dataSubpacketAwaitingCRC = false;
+    _dataSubpacketFrameEnd = 0;
+    _xmodemStarted = false;
+    _xmodemRetryCount = 0;
+    _xmodemRetryInterval = 0;
+    _xmodemExpectedBlock = 1;
+    _xmodemSendStarted = false;
+    _xmodemSendBlock = 1;
+    _xmodemSendRetry = 0;
+    _xmodemSendLast = 0;
+    _xmodemSendInterval = 0;
+    _xmodemLastPending = false;
     if (_debug) {
         _debug->print("ZModemEngine: send() started\n");
     }
@@ -93,6 +118,21 @@ bool ZModemEngine::receive(unsigned long timeout) {
     _timeoutMs = timeout;
     _operationStartTime = millis();
     _lastActivity = millis();
+    _inBufLen = 0;
+    _fileInfoIndex = 0;
+    _fileInfoEscape = false;
+    _fileInfoAwaitingCRC = false;
+    _fileInfoFrameEnd = 0;
+    _dataSubpacketLen = 0;
+    _dataSubpacketEscape = false;
+    _dataSubpacketAwaitingCRC = false;
+    _dataSubpacketFrameEnd = 0;
+    _xmodemStarted = false;
+    _xmodemRetryCount = 0;
+    _xmodemRetryInterval = 0;
+    _xmodemExpectedBlock = 1;
+    _xmodemSendStarted = false;
+    _xmodemLastPending = false;
     
     // Receiver sends ZRINIT to start
     _sendHexHeader(ZRINIT, ZERO_FLAGS); 
@@ -346,200 +386,182 @@ void ZModemEngine::_handleSenderLoop() {
 void ZModemEngine::_handleReceiverLoop() {
     uint8_t rxType;
     uint8_t rxFlags[4];
-    
-    // Process incoming control header
-    if (_io->available()) {
-        int res = _readHexHeader(rxType, rxFlags);
-        
+    if ((_rState == RSTATE_AWAIT_HEADER || _rState == RSTATE_AWAIT_ZDATA) && _io->available()) {
+        int res = _readHeader(rxType, rxFlags);
+
         if (res == 1) {
-             _lastActivity = millis();
-             
-             if (rxType == ZRQINIT) {
-                 // Sender requests initialization
-                 _sendHexHeader(ZRINIT, ZERO_FLAGS);
-                 _rState = RSTATE_AWAIT_HEADER;
-             }
-             else if (rxType == ZFILE) {
-                 // Sender announces file — next comes a data subpacket containing
-                 // NUL-terminated filename and ASCII filesize. Enter the
-                 // RSTATE_READ_ZFILE state and accumulate the subpacket
-                 // non-blocking (we will parse when the terminating ZDLE/... is seen).
-                 _fileInfoIndex = 0;
-                 _fileInfoEscape = false;
-                 _fileInfoAwaitingCRC = false;
-                 _rState = RSTATE_READ_ZFILE;
-             }
-             else if (rxType == ZDATA) {
-                 // ZDATA header received, next bytes are subpacket data
-                 // The main loop handles the file stream write based on RSTATE_READ_ZDATA
-                 
-                 // NOTE: Since the ZModem Engine does NOT handle data subpacket reading/escaping/CRC checks
-                 // directly in the loop, this is where commercial hardening is needed.
-                 // This engine expects the stream to contain clean data if in RSTATE_READ_ZDATA.
-                 
-                 // Implicitly ACK by sending ZACK or ZRPOS after data read
-             }
-             else if (rxType == ZEOF) {
-                 // Received End of File signal
-                 _sendHexHeader(ZRINIT, ZERO_FLAGS); // Ready for next file or ZFIN
-             }
-             else if (rxType == ZFIN) {
-                 _sendHexHeader(ZFIN, ZERO_FLAGS);
-                 _state = STATE_COMPLETE;
-             }
+            _lastActivity = millis();
+
+            if (rxType == ZRQINIT) {
+                _sendHexHeader(ZRINIT, ZERO_FLAGS);
+                _rState = RSTATE_AWAIT_HEADER;
+            } else if (rxType == ZFILE) {
+                _fileInfoIndex = 0;
+                _fileInfoEscape = false;
+                _fileInfoAwaitingCRC = false;
+                _fileInfoFrameEnd = 0;
+                _rState = RSTATE_READ_ZFILE;
+            } else if (rxType == ZDATA) {
+                _dataSubpacketLen = 0;
+                _dataSubpacketEscape = false;
+                _dataSubpacketAwaitingCRC = false;
+                _dataSubpacketFrameEnd = 0;
+                _rState = RSTATE_READ_ZDATA;
+            } else if (rxType == ZEOF) {
+                _sendHexHeader(ZRINIT, ZERO_FLAGS);
+                _rState = RSTATE_AWAIT_HEADER;
+            } else if (rxType == ZFIN) {
+                _sendHexHeader(ZFIN, ZERO_FLAGS);
+                _state = STATE_COMPLETE;
+                _rState = RSTATE_COMPLETE;
+                return;
+            }
         }
     }
-    
-    // Data Writing Loop (if actively reading data)
+
     if (_rState == RSTATE_READ_ZFILE) {
-        // Accumulate the ZFILE data subpacket (filename\0filesize\0), with ZDLE-escaping.
-        // Read available bytes non-destructively into the internal input buffer
         _fillInput();
-        // Parse from _inBuf similar to header parsing but handle ZFILE subpacket bytes
-        // We will consume bytes from _inBuf as we process them.
+
         size_t idx = 0;
         while (idx < _inBufLen) {
+            if (_fileInfoAwaitingCRC) {
+                if (_inBufLen - idx < 2) break;
+
+                idx += 2;
+                size_t infoLen = (_fileInfoIndex < (sizeof(_fileInfoBuffer) - 1)) ? _fileInfoIndex : (sizeof(_fileInfoBuffer) - 1);
+                _fileInfoBuffer[infoLen] = '\0';
+
+                const char* filename = (const char*)_fileInfoBuffer;
+                const char* sizeStr = nullptr;
+                for (size_t i = 0; i < infoLen; ++i) {
+                    if (_fileInfoBuffer[i] == '\0') {
+                        sizeStr = (const char*)(_fileInfoBuffer + i + 1);
+                        break;
+                    }
+                }
+
+                if (!sizeStr) {
+                    _state = STATE_ERROR;
+                    return;
+                }
+
+                strncpy(_filename, filename, FILENAME_MAX_LEN - 1);
+                _filename[FILENAME_MAX_LEN - 1] = '\0';
+                _fileSize = (sizeStr[0] != '\0') ? strtoul(sizeStr, NULL, 10) : 0;
+
+                _sendHexHeader(ZRPOS, ZERO_FLAGS);
+                _fileInfoIndex = 0;
+                _fileInfoEscape = false;
+                _fileInfoAwaitingCRC = false;
+                _fileInfoFrameEnd = 0;
+                _rState = RSTATE_AWAIT_ZDATA;
+                continue;
+            }
+
             uint8_t b = _inBuf[idx++];
             if (!_fileInfoEscape) {
-                if (b == ZDLE) { _fileInfoEscape = true; continue; }
-                if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) _fileInfoBuffer[_fileInfoIndex++] = b;
-                else { _state = STATE_ERROR; return; }
+                if (b == ZDLE) {
+                    _fileInfoEscape = true;
+                    continue;
+                }
+                if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) {
+                    _fileInfoBuffer[_fileInfoIndex++] = b;
+                } else {
+                    _state = STATE_ERROR;
+                    return;
+                }
             } else {
                 _fileInfoEscape = false;
                 if (b == ZCRCE || b == ZCRCG || b == ZCRCW) {
-                    // End-of-subpacket. Need two CRC bytes; ensure they are in _inBuf
-                    if (idx + 2 > _inBufLen) {
-                        // not enough bytes yet; roll back idx and wait
-                        idx -= 1; // put back the marker
-                        break;
-                    }
-                    // skip CRC bytes
-                    idx += 2;
-
-                    // Null-terminate and parse filename and filesize
-                    _fileInfoBuffer[_fileInfoIndex] = 0;
-                    const char* p = (const char*)_fileInfoBuffer;
-                    size_t fnameLen = strlen(p);
-                    const char* sizeStr = p + fnameLen + 1;
-                    size_t parsedSize = 0;
-                    if (sizeStr && *sizeStr) parsedSize = strtoul(sizeStr, NULL, 10);
-
-                    // Store parsed filename into fixed buffer
-                    strncpy(_filename, p, FILENAME_MAX_LEN - 1);
-                    _filename[FILENAME_MAX_LEN - 1] = '\0';
-                    _fileSize = parsedSize;
-
-                    // Acknowledge and move to reading actual file data
-                    _sendHexHeader(ZRPOS, ZERO_FLAGS);
-                    _rState = RSTATE_READ_ZDATA;
-
-                    // Reset file-info accumulators
-                    _fileInfoIndex = 0;
-                    _fileInfoEscape = false;
-                    _fileInfoAwaitingCRC = false;
-
-                    // Remove consumed bytes from _inBuf
-                    if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
-                    _inBufLen -= idx;
-                    idx = 0;
-                    break;
+                    _fileInfoAwaitingCRC = true;
+                    _fileInfoFrameEnd = b;
                 } else {
-                    // Normal escaped byte
                     uint8_t orig = b ^ 0x40;
-                    if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) _fileInfoBuffer[_fileInfoIndex++] = orig;
-                    else { _state = STATE_ERROR; return; }
+                    if (_fileInfoIndex < sizeof(_fileInfoBuffer) - 1) {
+                        _fileInfoBuffer[_fileInfoIndex++] = orig;
+                    } else {
+                        _state = STATE_ERROR;
+                        return;
+                    }
                 }
             }
         }
-        // if we've consumed some bytes without finishing, remove them
+
         if (idx > 0 && idx <= _inBufLen) {
             if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
             _inBufLen -= idx;
         }
     }
-    
+
     else if (_rState == RSTATE_READ_ZDATA && _file) {
-        // Read escaped subpackets, validate CRC, then write payload in bulk.
         _fillInput();
 
-        // Temporary buffer for unescaped data
-        const size_t SUBBUF_SZ = 512;
-        uint8_t subbuf[SUBBUF_SZ];
-        size_t subidx = 0;
-
         size_t idx = 0;
-        bool escape = false;
         while (idx < _inBufLen) {
-            uint8_t b = _inBuf[idx++];
+            if (_dataSubpacketAwaitingCRC) {
+                if (_inBufLen - idx < 2) break;
 
-            if (!escape) {
-                if (b == ZDLE) { escape = true; continue; }
-                // normal data byte
-                if (subidx < SUBBUF_SZ) subbuf[subidx++] = b;
-                else { _state = STATE_ERROR; return; }
-            } else {
-                // escaped byte or end-of-subpacket marker
-                escape = false;
-                if (b == ZCRCE || b == ZCRCG || b == ZCRCW) {
-                    // End-of-subpacket marker: need two CRC bytes following
-                    if (idx + 2 > _inBufLen) {
-                        // wait for CRC bytes to arrive
-                        idx -= 1; // push back ZDLE marker handling
-                        break;
+                uint8_t crcHigh = _inBuf[idx++];
+                uint8_t crcLow = _inBuf[idx++];
+                uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
+                uint16_t crc = 0;
+                for (size_t j = 0; j < _dataSubpacketLen; ++j) crc = _updcrc(_dataSubpacketBuffer[j], crc);
+                crc = _updcrc(_dataSubpacketFrameEnd, crc);
+
+                if (crc == receivedCrc) {
+                    if (_dataSubpacketLen > 0) {
+                        _file->write(_dataSubpacketBuffer, _dataSubpacketLen);
+                        _bytesTransferred += _dataSubpacketLen;
                     }
-
-                    uint8_t crcHigh = _inBuf[idx++];
-                    uint8_t crcLow = _inBuf[idx++];
-                    uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
-
-                    // Compute CRC over unescaped data
-                    uint16_t crc = 0;
-                    for (size_t j = 0; j < subidx; ++j) crc = _updcrc(subbuf[j], crc);
-                    // include the end marker in CRC as sender does
-                    crc = _updcrc(b, crc);
-
-                    if (crc == receivedCrc) {
-                        // Valid subpacket: write to file
-                        if (subidx > 0) {
-                            _file->write(subbuf, subidx);
-                            _bytesTransferred += subidx;
-                        }
-                        // ACK the chunk
-                        _sendHexHeader(ZACK, ZERO_FLAGS);
-                        _lastActivity = millis();
-                        // reset subbuffer
-                        subidx = 0;
-                    } else {
-                        // CRC mismatch: request resend from current offset
-                        uint8_t pos[4];
-                        pos[0] = _bytesTransferred & 0xFF;
-                        pos[1] = (_bytesTransferred >> 8) & 0xFF;
-                        pos[2] = (_bytesTransferred >> 16) & 0xFF;
-                        pos[3] = (_bytesTransferred >> 24) & 0xFF;
-                        _sendHexHeader(ZRPOS, pos);
-                        _lastActivity = millis();
-                        // on CRC error we discard subbuf and continue waiting for resend
-                        subidx = 0;
-                    }
-                    // remove consumed bytes from _inBuf by shifting remaining
-                    if (idx < _inBufLen) {
-                        size_t rem = _inBufLen - idx;
-                        memmove(_inBuf, _inBuf + idx, rem);
-                        _inBufLen = rem;
-                    } else {
-                        _inBufLen = 0;
-                    }
-                    idx = 0; // restart parsing from buffer start
-                    continue;
+                    _sendHexHeader(ZACK, ZERO_FLAGS);
+                    _lastActivity = millis();
                 } else {
-                    // Normal escaped data byte
+                    uint8_t pos[4];
+                    pos[0] = _bytesTransferred & 0xFF;
+                    pos[1] = (_bytesTransferred >> 8) & 0xFF;
+                    pos[2] = (_bytesTransferred >> 16) & 0xFF;
+                    pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                    _sendHexHeader(ZRPOS, pos);
+                    _lastActivity = millis();
+                }
+
+                _dataSubpacketLen = 0;
+                _dataSubpacketEscape = false;
+                _dataSubpacketAwaitingCRC = false;
+                _dataSubpacketFrameEnd = 0;
+                _rState = RSTATE_AWAIT_ZDATA;
+                continue;
+            }
+
+            uint8_t b = _inBuf[idx++];
+            if (!_dataSubpacketEscape) {
+                if (b == ZDLE) {
+                    _dataSubpacketEscape = true;
+                    continue;
+                }
+                if (_dataSubpacketLen < sizeof(_dataSubpacketBuffer)) {
+                    _dataSubpacketBuffer[_dataSubpacketLen++] = b;
+                } else {
+                    _state = STATE_ERROR;
+                    return;
+                }
+            } else {
+                _dataSubpacketEscape = false;
+                if (b == ZCRCE || b == ZCRCG || b == ZCRCW) {
+                    _dataSubpacketAwaitingCRC = true;
+                    _dataSubpacketFrameEnd = b;
+                } else {
                     uint8_t orig = b ^ 0x40;
-                    if (subidx < SUBBUF_SZ) subbuf[subidx++] = orig;
-                    else { _state = STATE_ERROR; return; }
+                    if (_dataSubpacketLen < sizeof(_dataSubpacketBuffer)) {
+                        _dataSubpacketBuffer[_dataSubpacketLen++] = orig;
+                    } else {
+                        _state = STATE_ERROR;
+                        return;
+                    }
                 }
             }
         }
-        // remove any fully consumed bytes at front
+
         if (idx > 0 && idx <= _inBufLen) {
             if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
             _inBufLen -= idx;
@@ -971,12 +993,80 @@ int ZModemEngine::_readHexHeader(uint8_t& type, uint8_t* flags) {
         flags[i] = hexToByte(_inBuf[idx], _inBuf[idx+1]);
     }
 
+    uint16_t receivedCrc = ((uint16_t)hexToByte(_inBuf[14], _inBuf[15]) << 8) | hexToByte(_inBuf[16], _inBuf[17]);
+    uint16_t computedCrc = 0;
+    computedCrc = _updcrc(type, computedCrc);
+    for (int i = 0; i < 4; ++i) computedCrc = _updcrc(flags[i], computedCrc);
+
     // We consumed 4 control bytes + 16 ascii hex chars = 20 bytes
     size_t consumed = 4 + 16;
     // Remove consumed bytes from buffer
     if (consumed < _inBufLen) memmove(_inBuf, _inBuf + consumed, _inBufLen - consumed);
     _inBufLen -= consumed;
+    if (computedCrc != receivedCrc) return 0;
     return 1;
+}
+
+int ZModemEngine::_readHeader(uint8_t& type, uint8_t* flags) {
+    _fillInput();
+
+    while (_inBufLen > 0) {
+        if (_inBuf[0] != ZPAD) {
+            memmove(_inBuf, _inBuf + 1, _inBufLen - 1);
+            _inBufLen--;
+            continue;
+        }
+
+        if (_inBufLen >= 2 && _inBuf[1] == ZPAD) {
+            if (_inBufLen < 4) return 0;
+            if (_inBuf[2] == ZDLE && _inBuf[3] == ZHEX) {
+                return _readHexHeader(type, flags);
+            }
+        }
+
+        if (_inBufLen >= 2 && _inBuf[1] == ZDLE) {
+            if (_inBufLen < 3) return 0;
+            if (_inBuf[2] == ZBIN) {
+                size_t idx = 3;
+                auto readEscapedByte = [&](uint8_t& out) -> bool {
+                    if (idx >= _inBufLen) return false;
+                    uint8_t value = _inBuf[idx++];
+                    if (value == ZDLE) {
+                        if (idx >= _inBufLen) {
+                            idx--;
+                            return false;
+                        }
+                        value = _inBuf[idx++] ^ 0x40;
+                    }
+                    out = value;
+                    return true;
+                };
+
+                uint8_t crcHigh;
+                uint8_t crcLow;
+                if (!readEscapedByte(type)) return 0;
+                for (int i = 0; i < 4; ++i) {
+                    if (!readEscapedByte(flags[i])) return 0;
+                }
+                if (!readEscapedByte(crcHigh) || !readEscapedByte(crcLow)) return 0;
+
+                uint16_t computedCrc = 0;
+                computedCrc = _updcrc(type, computedCrc);
+                for (int i = 0; i < 4; ++i) computedCrc = _updcrc(flags[i], computedCrc);
+                uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
+
+                if (idx < _inBufLen) memmove(_inBuf, _inBuf + idx, _inBufLen - idx);
+                _inBufLen -= idx;
+                if (computedCrc != receivedCrc) return 0;
+                return 1;
+            }
+        }
+
+        memmove(_inBuf, _inBuf + 1, _inBufLen - 1);
+        _inBufLen--;
+    }
+
+    return 0;
 }
 
 void ZModemEngine::_fillInput() {

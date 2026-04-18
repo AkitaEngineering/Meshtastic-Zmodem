@@ -87,6 +87,9 @@ public:
     // Main Loop
     int loop(); // Returns 0 for busy, 1 for complete, -1 for error
 
+    void setDebugStream(Stream* debugStream) { _debug = debugStream; }
+    void setXmodemCompatibility(bool enable) { _xmodemEnabled = enable; }
+
     // Getters
     size_t getBytesTransferred() const { return _bytesTransferred; }
     size_t getFileSize() const { return _fileSize; }
@@ -132,16 +135,20 @@ private:
     size_t _fileInfoIndex;
     bool _fileInfoEscape;
     bool _fileInfoAwaitingCRC;
+    uint8_t _fileInfoFrameEnd;
+    uint8_t _dataSubpacketBuffer[512];
+    size_t _dataSubpacketLen;
+    bool _dataSubpacketEscape;
+    bool _dataSubpacketAwaitingCRC;
+    uint8_t _dataSubpacketFrameEnd;
     // Internal input buffer to avoid destructive reads on Stream
     uint8_t _inBuf[512];
     size_t _inBufLen;
     void _fillInput();
     // Optional debug stream for logging
     Stream* _debug = nullptr;
-    void setDebug(Stream* debugStream) { _debug = debugStream; }
     // XMODEM compatibility shim
     bool _xmodemEnabled = false;
-    void enableXmodemCompatibility(bool enable) { _xmodemEnabled = enable; }
     // XMODEM runtime state
     bool _xmodemStarted = false;
     bool _xmodemUseCRC = true; // prefer CRC mode
@@ -174,6 +181,7 @@ private:
     // Input Handling
     void _processInput();
     int _readHexHeader(uint8_t& type, uint8_t* flags);
+    int _readHeader(uint8_t& type, uint8_t* flags);
     
     // Helper State handlers
     void _handleSenderLoop();

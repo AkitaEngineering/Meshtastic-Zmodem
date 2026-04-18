@@ -105,13 +105,14 @@ bool ZmodemModule::handleReceived(MeshPacket& packet) {
     // 2. Is it a DATA packet?
     } else if (packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {
         // This is a data packet, feed it to the library's stream processor
-        // Only process if we are actively receiving
-        if (akitaZmodem.getCurrentState() == AkitaMeshZmodem::TransferState::RECEIVING) {
+        // Both sender and receiver consume protocol bytes on the data port.
+        AkitaMeshZmodem::TransferState state = akitaZmodem.getCurrentState();
+        if (state == AkitaMeshZmodem::TransferState::RECEIVING || state == AkitaMeshZmodem::TransferState::SENDING) {
             LOG_DEBUG("ZmodemModule pushing DATA packet to library.");
             akitaZmodem.processDataPacket(packet);
             return true; // We consumed this packet
         } else {
-            LOG_DEBUG("ZmodemModule ignoring DATA packet (not in RECEIVING state).");
+            LOG_DEBUG("ZmodemModule ignoring DATA packet (no active transfer).");
             return false; // Not actively receiving, let it be dropped
         }
 

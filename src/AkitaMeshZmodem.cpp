@@ -68,24 +68,40 @@ public:
     void setDestination(NodeNum d) { _destinationNodeId = d; }
     
     void pushPacket(MeshPacket& packet) {
-        if (_rxBufferIndex < _rxBufferSize) return;
         const uint8_t* p = packet.decoded.payload.getBuffer();
         if (packet.decoded.payload.length() < 3 || p[0] != _packetIdentifier) return;
         
         uint16_t pid = (p[1] << 8) | p[2];
         if (pid == _expectedPacketId) {
-            _rxBufferSize = packet.decoded.payload.length() - 3;
-            if(_rxBufferSize > AKZ_STREAM_RX_BUFFER_SIZE) _rxBufferSize = 0;
-            else {
-                memcpy(_rxBuffer, p + 3, _rxBufferSize);
+            if (_rxBufferIndex > 0 && _rxBufferIndex < _rxBufferSize) {
+                size_t unread = _rxBufferSize - _rxBufferIndex;
+                memmove(_rxBuffer, _rxBuffer + _rxBufferIndex, unread);
+                _rxBufferSize = unread;
                 _rxBufferIndex = 0;
-                _expectedPacketId++;
+            } else if (_rxBufferIndex >= _rxBufferSize) {
+                _rxBufferIndex = 0;
+                _rxBufferSize = 0;
             }
+
+            size_t chunkLen = packet.decoded.payload.length() - 3;
+            if ((_rxBufferSize + chunkLen) > AKZ_STREAM_RX_BUFFER_SIZE) return;
+
+            memcpy(_rxBuffer + _rxBufferSize, p + 3, chunkLen);
+            _rxBufferSize += chunkLen;
+            _expectedPacketId++;
         }
     }
 
     virtual int available() override { return _rxBufferSize - _rxBufferIndex; }
-    virtual int read() override { return available() ? _rxBuffer[_rxBufferIndex++] : -1; }
+    virtual int read() override {
+        if (!available()) return -1;
+        int value = _rxBuffer[_rxBufferIndex++];
+        if (_rxBufferIndex >= _rxBufferSize) {
+            _rxBufferIndex = 0;
+            _rxBufferSize = 0;
+        }
+        return value;
+    }
     virtual int peek() override { return available() ? _rxBuffer[_rxBufferIndex] : -1; }
     virtual size_t write(uint8_t val) override {
         if (!_mesh || _destinationNodeId == BROADCAST_ADDR) return 0;
@@ -123,6 +139,7 @@ void AkitaMeshZmodem::begin(Meshtastic& meshInstance, FS& filesystem, Stream* de
     _meshStream = new MeshtasticZModemStream(_mesh, _debug, _maxPacketSize, AKZ_PACKET_IDENTIFIER);
     
     _zmodem.begin(*_meshStream);
+    _zmodem.setDebugStream(_debug);
     _log("Akita ZModem Initialized (Internal Engine)");
     _resetTransferState();
 }
@@ -145,7 +162,7 @@ void AkitaMeshZmodem::processDataPacket(MeshPacket& packet) {
 }
 
 bool AkitaMeshZmodem::startSend(const String& filePath, NodeNum dest) {
-    if (_currentState != TransferState::IDLE || dest == BROADCAST_ADDR) return false;
+    if (_currentState != TransferState::IDLE || dest == BROADCAST_ADDR || !_fs || !_meshStream) return false;
     _resetTransferState();
     
     _transferFile = _fs->open(filePath, FILE_READ);
@@ -171,7 +188,7 @@ bool AkitaMeshZmodem::startSend(const String& filePath, NodeNum dest) {
 }
 
 bool AkitaMeshZmodem::startReceive(const String& filePath) {
-    if (_currentState != TransferState::IDLE) return false;
+    if (_currentState != TransferState::IDLE || !_fs || !_meshStream) return false;
     _resetTransferState();
     
     _transferFile = _fs->open(filePath, FILE_WRITE);

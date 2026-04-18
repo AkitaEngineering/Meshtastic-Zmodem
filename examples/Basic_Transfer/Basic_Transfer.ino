@@ -153,6 +153,7 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         if (akitaZmodem.getCurrentState() != AkitaMeshZmodem::TransferState::IDLE) {
             Serial.println("Ignoring command: Transfer already in progress.");
             Serial.print("Current state: "); Serial.println((int)akitaZmodem.getCurrentState());
+            free(msg);
             return;
         }
         
@@ -228,7 +229,8 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
     } else if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {
         
         // This is a data packet, feed it to the library
-        if (akitaZmodem.getCurrentState() == AkitaMeshZmodem::TransferState::RECEIVING) {
+        AkitaMeshZmodem::TransferState state = akitaZmodem.getCurrentState();
+        if (state == AkitaMeshZmodem::TransferState::RECEIVING || state == AkitaMeshZmodem::TransferState::SENDING) {
             Serial.print("."); // Indicate data packet received
             akitaZmodem.processDataPacket(packet);
         } else {

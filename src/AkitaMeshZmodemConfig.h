@@ -56,7 +56,7 @@
  * Should be at least AKZ_DEFAULT_MAX_PACKET_SIZE.
  */
 #ifndef AKZ_STREAM_RX_BUFFER_SIZE
-#define AKZ_STREAM_RX_BUFFER_SIZE 256 // Slightly larger than max packet size
+#define AKZ_STREAM_RX_BUFFER_SIZE 512 // Enough headroom for multiple mesh packets
 #endif
 
 /**
