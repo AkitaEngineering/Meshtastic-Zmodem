@@ -43,6 +43,7 @@ ZModemEngine::ZModemEngine() {
     _lastDataLen = 0;
     _lastDataPos = 0;
     _lastDataPending = false;
+    _lastDataEndFrame = false;
     _lastSendTime = 0;
     _baseRetryIntervalMs = DEFAULT_BASE_RETRY_MS;
     _retryIntervalMs = _baseRetryIntervalMs;
@@ -104,6 +105,8 @@ bool ZModemEngine::send(unsigned long timeout) {
     _xmodemSendLast = 0;
     _xmodemSendInterval = 0;
     _xmodemLastPending = false;
+    _lastDataPending = false;
+    _lastDataEndFrame = false;
     if (_debug) {
         _debug->print("ZModemEngine: send() started\n");
     }
@@ -133,6 +136,8 @@ bool ZModemEngine::receive(unsigned long timeout) {
     _xmodemExpectedBlock = 1;
     _xmodemSendStarted = false;
     _xmodemLastPending = false;
+    _lastDataPending = false;
+    _lastDataEndFrame = false;
     
     // Receiver sends ZRINIT to start
     _sendHexHeader(ZRINIT, ZERO_FLAGS); 
@@ -240,7 +245,24 @@ void ZModemEngine::_handleSenderLoop() {
                      }
                      break;
                 case STATE_SEND_ZEOF:
-                    if (rxType == ZRINIT) {
+                    if (rxType == ZACK) {
+                        _lastDataPending = false;
+                        _retryCount = 0;
+                        _retryIntervalMs = _baseRetryIntervalMs;
+                    } else if (rxType == ZRPOS) {
+                        size_t pos = rxFlags[0] | (rxFlags[1] << 8) | (rxFlags[2] << 16) | (rxFlags[3] << 24);
+                        if (_file) {
+                            _file->seek(pos);
+                        }
+                        _bytesTransferred = pos;
+                        _lastDataPending = (_lastDataLen > 0 && _lastDataPos == pos);
+                        if (_lastDataPending) {
+                            _retryIntervalMs = _baseRetryIntervalMs;
+                            _lastSendTime = millis();
+                            _retryCount = 0;
+                        }
+                        _state = STATE_SEND_ZDATA;
+                    } else if (rxType == ZRINIT) {
                         // Receiver ready for next file or finish
                         _state = STATE_SEND_ZFIN;
                     }
@@ -321,7 +343,7 @@ void ZModemEngine::_handleSenderLoop() {
                     pos[2] = (_lastDataPos >> 16) & 0xFF;
                     pos[3] = (_lastDataPos >> 24) & 0xFF;
                     _sendBinaryHeader(ZDATA, pos);
-                    _sendDataSubpacket(_lastDataBuf, _lastDataLen, false);
+                    _sendDataSubpacket(_lastDataBuf, _lastDataLen, _lastDataEndFrame);
                     _lastSendTime = millis();
                     _retryCount++;
                     _retryIntervalMs = (unsigned long)min((unsigned long)MAX_RETRY_INTERVAL_MS, _retryIntervalMs * 2UL);
@@ -344,6 +366,7 @@ void ZModemEngine::_handleSenderLoop() {
                         // Cache last data for potential retransmit
                         _lastDataLen = readLen;
                         _lastDataPos = _bytesTransferred;
+                        _lastDataEndFrame = isLast;
                         _lastDataPending = true;
                         _lastSendTime = millis();
                         _retryCount = 0;

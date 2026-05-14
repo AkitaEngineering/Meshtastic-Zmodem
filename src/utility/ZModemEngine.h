@@ -126,6 +126,7 @@ private:
     size_t _lastDataLen;
     size_t _lastDataPos; // file offset for the lastDataBuf
     bool _lastDataPending;
+    bool _lastDataEndFrame;
     unsigned long _lastSendTime;
     unsigned long _retryIntervalMs;
     unsigned long _baseRetryIntervalMs;
