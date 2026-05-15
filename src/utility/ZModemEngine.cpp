@@ -53,6 +53,57 @@ ZModemEngine::ZModemEngine() {
     _xmodemLastPending = false;
 }
 
+void ZModemEngine::reset()
+{
+    _file = nullptr;
+    _filename[0] = '\0';
+    _state = STATE_IDLE;
+    _rState = RSTATE_IDLE;
+    _bytesTransferred = 0;
+    _fileSize = 0;
+    _isSender = false;
+    _operationStartTime = 0;
+    _timeoutMs = 0;
+    _lastActivity = 0;
+    _inBufLen = 0;
+
+    _fileInfoIndex = 0;
+    _fileInfoEscape = false;
+    _fileInfoAwaitingCRC = false;
+    _fileInfoFrameEnd = 0;
+    _dataSubpacketLen = 0;
+    _dataSubpacketEscape = false;
+    _dataSubpacketAwaitingCRC = false;
+    _dataSubpacketFrameEnd = 0;
+
+    _senderLastSend = 0;
+    _receiverLastAck = 0;
+
+    _lastDataLen = 0;
+    _lastDataPos = 0;
+    _lastDataPending = false;
+    _lastDataEndFrame = false;
+    _lastSendTime = 0;
+    _baseRetryIntervalMs = DEFAULT_BASE_RETRY_MS;
+    _retryIntervalMs = _baseRetryIntervalMs;
+
+    _xmodemStarted = false;
+    _xmodemUseCRC = true;
+    _xmodemExpectedBlock = 1;
+    _xmodemRetryCount = 0;
+    _xmodemLastSend = 0;
+    _xmodemRetryInterval = 0;
+    _xmodemSendStarted = false;
+    _xmodemSendBlock = 1;
+    _xmodemSendRetry = 0;
+    _xmodemSendLast = 0;
+    _xmodemSendInterval = 0;
+    _xmodemLastLen = 0;
+    _xmodemLastPos = 0;
+    _xmodemLastPending = false;
+    _retryCount = 0;
+}
+
 void ZModemEngine::begin(Stream& ioStream) {
     _io = &ioStream;
     _inBufLen = 0;
@@ -151,6 +202,7 @@ void ZModemEngine::abort() {
     if (_io) {
         uint8_t abortSeq[] = {ZDLE, ZCAN, ZDLE, ZCAN, ZDLE, ZCAN, ZDLE, ZCAN};
         _io->write(abortSeq, 8);
+        _io->flush();
     }
     _state = STATE_ERROR;
 }
@@ -626,6 +678,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         if (now - _xmodemLastSend >= _xmodemRetryInterval) {
             // send requester: 'C' for CRC mode or NAK for checksum
             if (_xmodemUseCRC) _io->write('C'); else _io->write(XNAK);
+            _io->flush();
             _xmodemLastSend = now;
             _xmodemRetryCount++;
             // exponential backoff
@@ -647,6 +700,7 @@ void ZModemEngine::_handleXmodemReceiver() {
     if (c == XEOT) {
         _io->read();
         _io->write(XACK);
+        _io->flush();
         _lastActivity = millis();
         _state = STATE_COMPLETE;
         if (_debug) _debug->print("ZModemEngine: XMODEM EOT received, transfer complete\n");
@@ -673,6 +727,7 @@ void ZModemEngine::_handleXmodemReceiver() {
     int blkComp = _io->read();
     if ((blk ^ blkComp) != 0xFF) {
         _io->write(XNAK);
+        _io->flush();
         return;
     }
 
@@ -693,6 +748,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         if (calc != receivedCrc) {
             // CRC fail -> request resend
             _io->write(XNAK);
+            _io->flush();
             // retry/backoff
             if (_xmodemRetryCount++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
             if (_xmodemRetryInterval == 0) _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
@@ -705,6 +761,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         uint8_t sum = 0; for (size_t i = 0; i < blockSize; ++i) sum = (uint8_t)(sum + dataBuf[i]);
         if (sum != (uint8_t)chksum) {
             _io->write(XNAK);
+            _io->flush();
             if (_xmodemRetryCount++ >= XMODEM_MAX_RETRIES) { _state = STATE_ERROR; return; }
             if (_xmodemRetryInterval == 0) _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
             _xmodemRetryInterval = min((unsigned long)MAX_RETRY_INTERVAL_MS, _xmodemRetryInterval * 2UL);
@@ -718,6 +775,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         _file->write(dataBuf, blockSize);
         _bytesTransferred += blockSize;
         _io->write(XACK);
+        _io->flush();
         _lastActivity = millis();
         _xmodemExpectedBlock++;
         _xmodemRetryCount = 0;
@@ -725,9 +783,11 @@ void ZModemEngine::_handleXmodemReceiver() {
     } else if (blk == (uint8_t)(_xmodemExpectedBlock - 1)) {
         // duplicate block (sender retransmitted last, maybe ACK lost) -> ack again
         _io->write(XACK);
+        _io->flush();
     } else {
         // unexpected block number
         _io->write(XNAK);
+        _io->flush();
     }
 }
 
@@ -804,6 +864,7 @@ void ZModemEngine::_handleXmodemSender() {
         // No more data: send EOT and wait for ACK
         if (_xmodemSendLast == 0) {
             _io->write(XEOT);
+            _io->flush();
             _xmodemSendLast = millis();
             _xmodemSendRetry = 0;
             _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
@@ -877,6 +938,7 @@ void ZModemEngine::_handleXmodemSender() {
     _xmodemSendLast = millis();
     _xmodemSendRetry = 0;
     _xmodemSendInterval = DEFAULT_BASE_RETRY_MS;
+    _io->flush();
 }
 
 
@@ -904,6 +966,7 @@ void ZModemEngine::_sendHexHeader(uint8_t type, const uint8_t* flags) {
     
     _io->write('\r'); _io->write('\n');
     if (type != ZFIN && type != ZACK) _io->write(0x11); // XON
+    _io->flush();
 }
 
 void ZModemEngine::_sendBinaryHeader(uint8_t type, const uint8_t* flags) {
@@ -953,6 +1016,7 @@ void ZModemEngine::_sendDataSubpacket(const uint8_t* data, size_t len, bool endF
     
     _io->write((crc >> 8) & 0xFF);
     _io->write(crc & 0xFF);
+    _io->flush();
 }
 
 // Simple CRC16 XMODEM update

@@ -83,6 +83,7 @@ public:
     bool send(unsigned long timeout);
     bool receive(unsigned long timeout);
     void abort();
+    void reset();
 
     // Main Loop
     int loop(); // Returns 0 for busy, 1 for complete, -1 for error

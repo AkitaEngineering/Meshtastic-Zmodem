@@ -2,6 +2,7 @@
 #define GLOBALS_H
 
 #include <FS.h>
+#include <Stream.h>
 #include <SPIFFS.h>
 
 // Global objects expected by ZmodemModule (provided by Meshtastic firmware at runtime).

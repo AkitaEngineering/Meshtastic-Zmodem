@@ -17,6 +17,17 @@
 // --- Default Configuration Values ---
 
 /**
+ * @brief Maximum decoded payload bytes available in a Meshtastic application packet.
+ *
+ * The current Meshtastic protobuf constant is 233 bytes. The ZModem wrapper uses
+ * 3 of those bytes for its packet identifier and sequence number, so the default
+ * file-data chunk size becomes 230 bytes.
+ */
+#ifndef AKZ_MESHTASTIC_MAX_PAYLOAD_LEN
+#define AKZ_MESHTASTIC_MAX_PAYLOAD_LEN 233
+#endif
+
+/**
  * @brief Default timeout for ZModem operations in milliseconds.
  * This needs to be long enough to account for LoRa latency and potential retries.
  */
@@ -26,12 +37,11 @@
 
 /**
  * @brief Default maximum payload size for Meshtastic packets used by this library.
- * This should not exceed the actual MTU (Maximum Transmission Unit) of the
- * Meshtastic network/radio configuration (typically around 230-240 bytes).
- * The ZModem stream wrapper needs 3 bytes for header (ID + Packet ID).
+ * This is the full Meshtastic decoded payload size, including the 3-byte
+ * ZModem transport header (identifier + packet ID).
  */
 #ifndef AKZ_DEFAULT_MAX_PACKET_SIZE
-#define AKZ_DEFAULT_MAX_PACKET_SIZE 230
+#define AKZ_DEFAULT_MAX_PACKET_SIZE AKZ_MESHTASTIC_MAX_PAYLOAD_LEN
 #endif
 
 /**
@@ -65,6 +75,16 @@
  */
 #ifndef AKZ_STREAM_TX_BUFFER_SIZE
 #define AKZ_STREAM_TX_BUFFER_SIZE 256 // Slightly larger than max packet size
+#endif
+
+/**
+ * @brief Whether individual ZModem data packets should ask Meshtastic for link-layer ACKs.
+ *
+ * The ZModem engine already implements end-to-end recovery, so this defaults to false to
+ * avoid stacking two reliability schemes on every chunk.
+ */
+#ifndef AKZ_ZMODEM_DATA_WANT_ACK
+#define AKZ_ZMODEM_DATA_WANT_ACK false
 #endif
 
 // --- PortNum Definitions ---

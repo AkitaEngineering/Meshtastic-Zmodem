@@ -37,4 +37,15 @@ public:
         const std::string text = std::to_string(value);
         return write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
     }
+
+    std::size_t println(const char* text)
+    {
+        std::size_t written = print(text);
+        return written + write(static_cast<uint8_t>('\n'));
+    }
+
+    std::size_t println()
+    {
+        return write(static_cast<uint8_t>('\n'));
+    }
 };

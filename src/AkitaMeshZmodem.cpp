@@ -26,6 +26,11 @@ private:
 
     void _streamLog(const char* msg) { if(_debug) { _debug->print("MeshStream: "); _debug->println(msg); } }
 
+    size_t maxPayloadSize() const {
+        const size_t effectiveMaxPacket = (_maxPacketSize < 4) ? 4 : _maxPacketSize;
+        return (effectiveMaxPacket < AKZ_STREAM_TX_BUFFER_SIZE) ? (effectiveMaxPacket - 3) : (AKZ_STREAM_TX_BUFFER_SIZE - 3);
+    }
+
     bool sendPacket() {
         if (_txBufferIndex == 0 || !_mesh) return true;
         if (_destinationNodeId == BROADCAST_ADDR) return false;
@@ -33,9 +38,7 @@ private:
         // Use a fixed-size packet buffer (avoid VLA). Ensure we don't exceed
         // either the configured max packet size or the internal TX buffer size.
         uint8_t packet[AKZ_STREAM_TX_BUFFER_SIZE];
-        // Ensure _maxPacketSize is reasonable to avoid underflow when subtracting header bytes
-        size_t effectiveMaxPacket = (_maxPacketSize < 4) ? 4 : _maxPacketSize;
-        size_t maxPayload = (effectiveMaxPacket < AKZ_STREAM_TX_BUFFER_SIZE) ? (effectiveMaxPacket - 3) : (AKZ_STREAM_TX_BUFFER_SIZE - 3);
+        const size_t maxPayload = maxPayloadSize();
 
         packet[0] = _packetIdentifier;
         packet[1] = (_sentPacketId >> 8) & 0xFF;
@@ -50,8 +53,9 @@ private:
         genericPacket.set_payload(packet, dataLen + 3);
         genericPacket.set_to(_destinationNodeId);
         genericPacket.set_portnum(AKZ_ZMODEM_DATA_PORTNUM);
-        genericPacket.set_want_ack(false);
-        genericPacket.set_hop_limit(3);
+        genericPacket.set_datatype(MeshPacket_DataType_OPAQUE);
+        genericPacket.set_want_ack(AKZ_ZMODEM_DATA_WANT_ACK);
+        genericPacket.set_hop_limit(_mesh->getHopLimit());
 
         bool success = _mesh->sendPacket(&genericPacket);
         if (success) {
@@ -65,10 +69,19 @@ public:
     MeshtasticZModemStream(Meshtastic* m, Stream* d, size_t s, uint8_t i) 
         : _mesh(m), _debug(d), _maxPacketSize(s), _packetIdentifier(i) {}
     
-    void setDestination(NodeNum d) { _destinationNodeId = d; }
+    void setDestination(NodeNum d) {
+        _destinationNodeId = d;
+        if (_destinationNodeId != BROADCAST_ADDR && _txBufferIndex > 0) {
+            flush();
+        }
+    }
     void setMaxPacketSize(size_t maxPacketSize) { _maxPacketSize = maxPacketSize; }
     
     void pushPacket(MeshPacket& packet) {
+        if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR) {
+            setDestination(packet.from);
+        }
+
         const uint8_t* p = packet.decoded.payload.getBuffer();
         if (packet.decoded.payload.length() < 3 || p[0] != _packetIdentifier) return;
         
@@ -105,7 +118,7 @@ public:
     }
     virtual int peek() override { return available() ? _rxBuffer[_rxBufferIndex] : -1; }
     virtual size_t write(uint8_t val) override {
-        if (!_mesh || _destinationNodeId == BROADCAST_ADDR) return 0;
+        if (!_mesh) return 0;
 
         // Prevent overflow of the internal TX buffer. If full, try to flush
         // the pending packet first; if still full, fail the write.
@@ -116,8 +129,7 @@ public:
 
         _txBuffer[_txBufferIndex++] = val;
         // Guard against underflow and ensure we don't exceed the max packet payload
-        size_t effectiveMaxPacket2 = (_maxPacketSize < 4) ? 4 : _maxPacketSize;
-        if (_txBufferIndex >= effectiveMaxPacket2 - 3) flush();
+        if (_txBufferIndex >= maxPayloadSize()) flush();
         return 1;
     }
     virtual void flush() override { sendPacket(); }
@@ -153,11 +165,15 @@ void AkitaMeshZmodem::_resetTransferState() {
     _filename = "";
     _destinationNodeId = BROADCAST_ADDR;
     if(_meshStream) _meshStream->reset();
-    _zmodem.abort(); // Reset engine state
+    _zmodem.reset();
 }
 
 void AkitaMeshZmodem::processDataPacket(MeshPacket& packet) {
     if(_meshStream && (_currentState == TransferState::RECEIVING || _currentState == TransferState::SENDING)) {
+        if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR) {
+            _destinationNodeId = packet.from;
+            _meshStream->setDestination(packet.from);
+        }
         _meshStream->pushPacket(packet);
     }
 }
