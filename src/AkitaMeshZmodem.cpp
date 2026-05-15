@@ -66,6 +66,7 @@ public:
         : _mesh(m), _debug(d), _maxPacketSize(s), _packetIdentifier(i) {}
     
     void setDestination(NodeNum d) { _destinationNodeId = d; }
+    void setMaxPacketSize(size_t maxPacketSize) { _maxPacketSize = maxPacketSize; }
     
     void pushPacket(MeshPacket& packet) {
         const uint8_t* p = packet.decoded.payload.getBuffer();
@@ -280,7 +281,12 @@ size_t AkitaMeshZmodem::getBytesTransferred() const { return _bytesTransferred; 
 size_t AkitaMeshZmodem::getTotalFileSize() const { return _totalFileSize > 0 ? _totalFileSize : _zmodem.getFileSize(); }
 String AkitaMeshZmodem::getFilename() const { return _filename; }
 void AkitaMeshZmodem::setTimeout(unsigned long t) { _zmodemTimeout = t; }
-void AkitaMeshZmodem::setMaxPacketSize(size_t s) { _maxPacketSize = s; }
+void AkitaMeshZmodem::setMaxPacketSize(size_t s) {
+    _maxPacketSize = s;
+    if (_meshStream) {
+        _meshStream->setMaxPacketSize(s);
+    }
+}
 void AkitaMeshZmodem::setProgressUpdateInterval(unsigned long i) { _progressUpdateInterval = i; }
 
 void AkitaMeshZmodem::_updateProgress() {

@@ -67,7 +67,7 @@ void setup() {
     createTestFiles();
 
     Serial.println("\n--- Setup Complete ---");
-    Serial.println("Listening for commands on Text Message Port (e.g., 4403)");
+    Serial.println("Listening for commands on Command Port (" + String(AKZ_ZMODEM_COMMAND_PORTNUM) + ")");
     Serial.println("Listening for data on ZModem Data Port (" + String(AKZ_ZMODEM_DATA_PORTNUM) + ")");
     Serial.println("\n--- Commands (send via Meshtastic text message) ---");
     Serial.println("  SEND:!NodeID:/<filename>  (e.g., SEND:!a1b2c3d4:/test_transfer.txt)");
@@ -120,7 +120,7 @@ void loop() {
 void onMeshtasticReceived(ReceivedPacket& packet) {
     
     // 1. Check for COMMANDS (on the standard text message port for this example)
-    if (packet.isValid && packet.decoded.portnum == PortNum_TEXT_MESSAGE_APP && packet.decoded.payload.length() > 0) {
+    if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_COMMAND_PORTNUM && packet.decoded.payload.length() > 0) {
 
         size_t payloadLen = packet.decoded.payload.length();
         const uint8_t* payloadBuf = packet.decoded.payload.getBuffer();

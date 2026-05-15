@@ -409,6 +409,13 @@ void ZModemEngine::_handleSenderLoop() {
 void ZModemEngine::_handleReceiverLoop() {
     uint8_t rxType;
     uint8_t rxFlags[4];
+
+    if (_xmodemEnabled && (_xmodemStarted || (_io && _io->available() &&
+                                              (_io->peek() == XSOH || _io->peek() == XSTX || _io->peek() == XEOT)))) {
+        _handleXmodemReceiver();
+        return;
+    }
+
     if ((_rState == RSTATE_AWAIT_HEADER || _rState == RSTATE_AWAIT_ZDATA) && _io->available()) {
         int res = _readHeader(rxType, rxFlags);
 
@@ -607,8 +614,6 @@ void ZModemEngine::_handleReceiverLoop() {
 // Basic XMODEM receiver (non-blocking, checksum-based fallback)
 void ZModemEngine::_handleXmodemReceiver() {
     if (!_io || !_file) return;
-    // Non-blocking: only proceed if there's at least one byte
-    if (!_io->available()) return;
 
     // We'll attempt CRC-mode first if enabled. If not started, periodically send 'C' to request CRC.
     if (!_xmodemStarted) {
@@ -642,6 +647,7 @@ void ZModemEngine::_handleXmodemReceiver() {
     if (c == XEOT) {
         _io->read();
         _io->write(XACK);
+        _lastActivity = millis();
         _state = STATE_COMPLETE;
         if (_debug) _debug->print("ZModemEngine: XMODEM EOT received, transfer complete\n");
         return;
@@ -654,22 +660,19 @@ void ZModemEngine::_handleXmodemReceiver() {
         return;
     }
 
-    // Now we have a block start; ensure enough bytes are available for header
-    if (_io->available() < 3) return;
+    _xmodemStarted = true;
+
+    size_t blockSize = (c == XSOH) ? 128 : 1024;
+    size_t needed = 1 + 2 + blockSize + (_xmodemUseCRC ? 2 : 1);
+    if ((size_t)_io->available() < needed) {
+        return;
+    }
+
     int start = _io->read(); // consume SOH/STX
     int blk = _io->read();
     int blkComp = _io->read();
     if ((blk ^ blkComp) != 0xFF) {
         _io->write(XNAK);
-        return;
-    }
-
-    size_t blockSize = (start == XSOH) ? 128 : 1024;
-    // Wait until full block + checksum/crc available
-    size_t needed = blockSize + (_xmodemUseCRC ? 2 : 1);
-    if ((size_t)_io->available() < needed) {
-        // put back header? cannot easily unread; instead, wait until bytes arrive
-        // Note: we've consumed header bytes; keep parsing as bytes arrive in future calls.
         return;
     }
 
@@ -715,6 +718,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         _file->write(dataBuf, blockSize);
         _bytesTransferred += blockSize;
         _io->write(XACK);
+        _lastActivity = millis();
         _xmodemExpectedBlock++;
         _xmodemRetryCount = 0;
         _xmodemRetryInterval = DEFAULT_BASE_RETRY_MS;
