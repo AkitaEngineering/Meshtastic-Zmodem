@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 using NodeNum = uint32_t;
-constexpr NodeNum BROADCAST_ADDR = 0;
+constexpr NodeNum BROADCAST_ADDR = 0xFFFFFFFFu;
 
 #define MeshPacket_DataType_OPAQUE 0
 #define MeshPacket_DataType_TEXT_MESSAGE 1

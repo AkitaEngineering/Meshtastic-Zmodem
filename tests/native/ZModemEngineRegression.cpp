@@ -207,6 +207,109 @@ bool testXmodemReceiverHandlesFragmentedBlock()
     return expect(outputFile.data() == payload, "receiver should preserve the fragmented XMODEM payload exactly");
 }
 
+class CoupledStream : public Stream {
+public:
+    std::deque<uint8_t>* incoming = nullptr;
+    std::deque<uint8_t>* outgoing = nullptr;
+
+    int available() override { return incoming ? static_cast<int>(incoming->size()) : 0; }
+    int read() override
+    {
+        if (!incoming || incoming->empty()) return -1;
+        const uint8_t value = incoming->front();
+        incoming->pop_front();
+        return value;
+    }
+    int peek() override { return (!incoming || incoming->empty()) ? -1 : incoming->front(); }
+    std::size_t write(uint8_t value) override
+    {
+        if (!outgoing) return 0;
+        outgoing->push_back(value);
+        return 1;
+    }
+};
+
+bool runCoupledTransfer(const std::vector<uint8_t>& payload, const char* name)
+{
+    fakeMillis = 0;
+    std::deque<uint8_t> a2b;
+    std::deque<uint8_t> b2a;
+    CoupledStream senderIO;
+    CoupledStream receiverIO;
+    senderIO.incoming = &b2a;
+    senderIO.outgoing = &a2b;
+    receiverIO.incoming = &a2b;
+    receiverIO.outgoing = &b2a;
+
+    File src(payload);
+    File dst;
+    ZModemEngine sender;
+    ZModemEngine receiver;
+    sender.begin(senderIO);
+    receiver.begin(receiverIO);
+    sender.setFileStream(&src, "/payload.bin", src.size());
+    receiver.setFileStream(&dst, "/received.bin", 0);
+    if (!expect(receiver.receive(20000), std::string(name) + ": receiver should start") ||
+        !expect(sender.send(20000), std::string(name) + ": sender should start")) {
+        return false;
+    }
+
+    int complete = 0;
+    for (int i = 0; i < 4000 && complete != 3; ++i) {
+        fakeMillis += 25;
+        const int senderResult = sender.loop();
+        const int receiverResult = receiver.loop();
+        if (senderResult < 0) {
+            std::cerr << "FAIL: " << name << " sender error at t=" << fakeMillis << std::endl;
+            return false;
+        }
+        if (receiverResult < 0) {
+            std::cerr << "FAIL: " << name << " receiver error at t=" << fakeMillis << std::endl;
+            return false;
+        }
+        if (senderResult == 1) complete |= 1;
+        if (receiverResult == 1) complete |= 2;
+    }
+
+    return expect(complete == 3, std::string(name) + ": both sides should complete") &&
+           expect(dst.data() == payload, std::string(name) + ": received payload should match");
+}
+
+bool testEngineTransfersCommonPayloads()
+{
+    std::vector<uint8_t> empty;
+    std::vector<uint8_t> oneByte = {0x18};
+    std::vector<uint8_t> controls(300);
+    for (std::size_t i = 0; i < controls.size(); ++i) {
+        controls[i] = static_cast<uint8_t>(i);
+    }
+    std::vector<uint8_t> twoK(2048);
+    for (std::size_t i = 0; i < twoK.size(); ++i) {
+        twoK[i] = static_cast<uint8_t>(i * 13);
+    }
+
+    return runCoupledTransfer(empty, "empty") &&
+           runCoupledTransfer(oneByte, "zdle-byte") &&
+           runCoupledTransfer(controls, "control-bytes") &&
+           runCoupledTransfer(twoK, "2k");
+}
+
+bool testReceiverStaysInReceivingState()
+{
+    fakeMillis = 0;
+    FakeStream stream;
+    File outputFile;
+    ZModemEngine engine;
+    engine.begin(stream);
+    engine.setFileStream(&outputFile, "/received.bin", 0);
+    if (!expect(engine.receive(10000), "receiver should start")) {
+        return false;
+    }
+    engine.loop();
+    return expect(engine.getState() == ZModemEngine::STATE_RECEIVING,
+                  "receiver should stay in STATE_RECEIVING until the transfer finishes");
+}
+
 } // namespace
 
 unsigned long millis()
@@ -218,8 +321,10 @@ int main()
 {
     const bool senderOk = testSenderRecoversFromRposAfterEof();
     const bool xmodemOk = testXmodemReceiverHandlesFragmentedBlock();
+    const bool transferOk = testEngineTransfersCommonPayloads();
+    const bool receiveStateOk = testReceiverStaysInReceivingState();
 
-    if (!senderOk || !xmodemOk) {
+    if (!senderOk || !xmodemOk || !transferOk || !receiveStateOk) {
         return 1;
     }
 

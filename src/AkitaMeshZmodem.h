@@ -2,19 +2,18 @@
  * @file AkitaMeshZmodem.h
  * @brief Main header file for Akita Meshtastic Zmodem Library.
  * Uses internal ZModemEngine for zero external dependencies.
- * @version 1.1.0
+ * @version 1.1.1
  */
 
 #ifndef AKITA_MESH_ZMODEM_H
 #define AKITA_MESH_ZMODEM_H
 
 #include <Arduino.h>
-#include "globals.h"    // bring in SPIFFS macro stub
+#include "globals.h"
 #include <Meshtastic.h>
-#include <StreamUtils.h>
 #include <FS.h>
 #include "AkitaMeshZmodemConfig.h"
-#include "utility/ZModemEngine.h" // Use internal engine
+#include "utility/ZModemEngine.h"
 
 class MeshtasticZModemStream;
 
@@ -37,6 +36,8 @@ public:
     bool startSend(const char* filePath, NodeNum destinationNodeId);
     bool startReceive(const char* filePath);
     void abortTransfer();
+    void reset();
+    bool isBusy() const;
 
     TransferState getCurrentState() const;
     size_t getBytesTransferred() const;

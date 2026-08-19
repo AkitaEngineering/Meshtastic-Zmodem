@@ -52,6 +52,7 @@ private:
         MeshPacket genericPacket;
         genericPacket.set_payload(packet, dataLen + 3);
         genericPacket.set_to(_destinationNodeId);
+        genericPacket.set_from(_mesh->getNodeNum());
         genericPacket.set_portnum(AKZ_ZMODEM_DATA_PORTNUM);
         genericPacket.set_datatype(MeshPacket_DataType_OPAQUE);
         genericPacket.set_want_ack(AKZ_ZMODEM_DATA_WANT_ACK);
@@ -78,32 +79,38 @@ public:
     void setMaxPacketSize(size_t maxPacketSize) { _maxPacketSize = maxPacketSize; }
     
     void pushPacket(MeshPacket& packet) {
-        if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR) {
+        if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR && packet.from != 0) {
             setDestination(packet.from);
+        }
+        if (_destinationNodeId != BROADCAST_ADDR && packet.from != 0 && packet.from != _destinationNodeId) {
+            return;
         }
 
         const uint8_t* p = packet.decoded.payload.getBuffer();
-        if (packet.decoded.payload.length() < 3 || p[0] != _packetIdentifier) return;
-        
-        uint16_t pid = (p[1] << 8) | p[2];
-        if (pid == _expectedPacketId) {
-            if (_rxBufferIndex > 0 && _rxBufferIndex < _rxBufferSize) {
-                size_t unread = _rxBufferSize - _rxBufferIndex;
-                memmove(_rxBuffer, _rxBuffer + _rxBufferIndex, unread);
-                _rxBufferSize = unread;
-                _rxBufferIndex = 0;
-            } else if (_rxBufferIndex >= _rxBufferSize) {
-                _rxBufferIndex = 0;
-                _rxBufferSize = 0;
-            }
+        if (!p || packet.decoded.payload.length() < 3 || p[0] != _packetIdentifier) return;
 
-            size_t chunkLen = packet.decoded.payload.length() - 3;
-            if ((_rxBufferSize + chunkLen) > AKZ_STREAM_RX_BUFFER_SIZE) return;
-
-            memcpy(_rxBuffer + _rxBufferSize, p + 3, chunkLen);
-            _rxBufferSize += chunkLen;
-            _expectedPacketId++;
+        uint16_t pid = (uint16_t)((p[1] << 8) | p[2]);
+        const int16_t delta = (int16_t)(pid - _expectedPacketId);
+        if (delta < 0) {
+            return;
         }
+
+        if (_rxBufferIndex > 0 && _rxBufferIndex < _rxBufferSize) {
+            size_t unread = _rxBufferSize - _rxBufferIndex;
+            memmove(_rxBuffer, _rxBuffer + _rxBufferIndex, unread);
+            _rxBufferSize = unread;
+            _rxBufferIndex = 0;
+        } else if (_rxBufferIndex >= _rxBufferSize) {
+            _rxBufferIndex = 0;
+            _rxBufferSize = 0;
+        }
+
+        size_t chunkLen = packet.decoded.payload.length() - 3;
+        if ((_rxBufferSize + chunkLen) > AKZ_STREAM_RX_BUFFER_SIZE) return;
+
+        memcpy(_rxBuffer + _rxBufferSize, p + 3, chunkLen);
+        _rxBufferSize += chunkLen;
+        _expectedPacketId = (uint16_t)(pid + 1);
     }
 
     virtual int available() override { return _rxBufferSize - _rxBufferIndex; }
@@ -169,29 +176,52 @@ void AkitaMeshZmodem::_resetTransferState() {
 }
 
 void AkitaMeshZmodem::processDataPacket(MeshPacket& packet) {
-    if(_meshStream && (_currentState == TransferState::RECEIVING || _currentState == TransferState::SENDING)) {
-        if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR) {
-            _destinationNodeId = packet.from;
-            _meshStream->setDestination(packet.from);
-        }
-        _meshStream->pushPacket(packet);
+    if (!_meshStream || !isBusy()) return;
+
+    if (_destinationNodeId != BROADCAST_ADDR && packet.from != 0 && packet.from != _destinationNodeId) {
+        return;
     }
+    if (_destinationNodeId == BROADCAST_ADDR && packet.from != BROADCAST_ADDR && packet.from != 0) {
+        _destinationNodeId = packet.from;
+        _meshStream->setDestination(packet.from);
+    }
+    _meshStream->pushPacket(packet);
+}
+
+static bool isSafeFsPath(const char* path) {
+    if (!path || path[0] != '/' || path[1] == '\0') return false;
+    for (const char* p = path; *p; ++p) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0') && (p == path || p[-1] == '/')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool isUnicastNode(NodeNum dest) {
+    return dest != 0 && dest != 0xFFFFFFFFu && dest != BROADCAST_ADDR;
 }
 
 bool AkitaMeshZmodem::startSend(const String& filePath, NodeNum dest) {
-    if (_currentState != TransferState::IDLE || dest == BROADCAST_ADDR || !_fs || !_meshStream) return false;
+    if (!_fs || !_meshStream || isBusy() || !isUnicastNode(dest) || !isSafeFsPath(filePath.c_str())) {
+        return false;
+    }
     _resetTransferState();
-    
+
     _transferFile = _fs->open(filePath, FILE_READ);
-    if (!_transferFile || _transferFile.isDirectory()) return false;
-    
+    if (!_transferFile) return false;
+    if (_transferFile.isDirectory()) {
+        _transferFile.close();
+        return false;
+    }
+
     _filename = filePath;
     _totalFileSize = _transferFile.size();
     _destinationNodeId = dest;
     _meshStream->setDestination(dest);
-    
+
     _zmodem.setFileStream(&_transferFile, _filename, _totalFileSize);
-    if(_zmodem.send(_zmodemTimeout)) {
+    if (_zmodem.send(_zmodemTimeout)) {
         _currentState = TransferState::SENDING;
         _transferStartTime = millis();
         {
@@ -201,20 +231,29 @@ bool AkitaMeshZmodem::startSend(const String& filePath, NodeNum dest) {
         }
         return true;
     }
+
+    _transferFile.close();
+    _resetTransferState();
     return false;
 }
 
 bool AkitaMeshZmodem::startReceive(const String& filePath) {
-    if (_currentState != TransferState::IDLE || !_fs || !_meshStream) return false;
+    if (!_fs || !_meshStream || isBusy() || !isSafeFsPath(filePath.c_str())) {
+        return false;
+    }
     _resetTransferState();
-    
+
     _transferFile = _fs->open(filePath, FILE_WRITE);
     if (!_transferFile) return false;
-    
+    if (_transferFile.isDirectory()) {
+        _transferFile.close();
+        return false;
+    }
+
     _filename = filePath;
     _zmodem.setFileStream(&_transferFile, _filename, 0);
-    
-    if(_zmodem.receive(_zmodemTimeout)) {
+
+    if (_zmodem.receive(_zmodemTimeout)) {
         _currentState = TransferState::RECEIVING;
         _transferStartTime = millis();
         {
@@ -224,6 +263,9 @@ bool AkitaMeshZmodem::startReceive(const String& filePath) {
         }
         return true;
     }
+
+    _transferFile.close();
+    _resetTransferState();
     return false;
 }
 
@@ -243,6 +285,14 @@ void AkitaMeshZmodem::abortTransfer() {
     _resetTransferState();
 }
 
+void AkitaMeshZmodem::reset() {
+    _resetTransferState();
+}
+
+bool AkitaMeshZmodem::isBusy() const {
+    return _currentState == TransferState::SENDING || _currentState == TransferState::RECEIVING;
+}
+
 AkitaMeshZmodem::TransferState AkitaMeshZmodem::loop() {
     if (_currentState == TransferState::IDLE || _currentState == TransferState::COMPLETE || _currentState == TransferState::ERROR) return _currentState;
 
@@ -259,11 +309,17 @@ AkitaMeshZmodem::TransferState AkitaMeshZmodem::loop() {
     if (res == 1) {
         _currentState = TransferState::COMPLETE;
         _log("Transfer Complete!");
-        _transferFile.close();
+        if (_transferFile) {
+            _transferFile.flush();
+            _transferFile.close();
+        }
     } else if (res == -1) {
         _currentState = TransferState::ERROR;
         _logError("Transfer Error (ZModem Engine reported failure)");
-        _transferFile.close();
+        if (_transferFile) {
+            _transferFile.flush();
+            _transferFile.close();
+        }
     }
 
     return _currentState;
@@ -272,7 +328,13 @@ AkitaMeshZmodem::TransferState AkitaMeshZmodem::loop() {
 
 // Map internal ZModem engine states to the public TransferState and log transitions
 void AkitaMeshZmodem::_handleZmodemState(int zState) {
-    // Don't override terminal states (COMPLETE/ERROR) here — loop() handles those.
+    // Don't override receive or terminal states — loop() owns COMPLETE/ERROR.
+    if (_currentState == TransferState::RECEIVING ||
+        _currentState == TransferState::COMPLETE ||
+        _currentState == TransferState::ERROR) {
+        return;
+    }
+
     switch(static_cast<ZModemEngine::State>(zState)) {
         case ZModemEngine::STATE_SEND_ZRQINIT:
         case ZModemEngine::STATE_SEND_ZFILE:

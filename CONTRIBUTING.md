@@ -9,6 +9,6 @@ Thanks for contributing to Akita Meshtastic ZModem.
 
 Before opening a PR:
 
-1. Run a local build for your target board.
-2. Verify no new warnings or regressions.
+1. Run `tests/native/run.sh`.
+2. Run a local build for your target board when changing firmware integration.
 3. Add a short entry to `CHANGELOG.md` describing the change.

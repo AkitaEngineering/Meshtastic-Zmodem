@@ -55,12 +55,13 @@ void ZmodemModule::loop() {
 
     if (currentState != lastReportedState) {
         if (currentState == AkitaMeshZmodem::TransferState::COMPLETE || currentState == AkitaMeshZmodem::TransferState::ERROR) {
-            // Final state messages are logged by the library itself
             LOG_INFO("Zmodem transfer finished. State: %d", (int)currentState);
+            akitaZmodem.reset();
+            lastReportedState = AkitaMeshZmodem::TransferState::IDLE;
         } else {
              LOG_INFO("Zmodem Status: %d", (int)currentState);
+             lastReportedState = currentState;
         }
-        lastReportedState = currentState;
         lastStatusReport = millis();
     }
     // Periodic status update if busy
@@ -83,20 +84,17 @@ bool ZmodemModule::handleReceived(MeshPacket& packet) {
 
            // Expecting text commands (e.g., OPAQUE or TEXT_MESSAGE type)
            if (packet.decoded.datatype == MeshPacket_DataType_OPAQUE || packet.decoded.datatype == MeshPacket_DataType_TEXT_MESSAGE) {
-              // Convert payload bytes to a NUL-terminated C-string (avoid Arduino String allocations)
               size_t payloadLen = packet.decoded.payload.length();
               const uint8_t* payloadBuf = packet.decoded.payload.getBuffer();
               if (payloadLen == 0 || !payloadBuf) return false;
-              char* msg = new char[payloadLen + 1];
+              char msg[256];
+              if (payloadLen >= sizeof(msg)) payloadLen = sizeof(msg) - 1;
               memcpy(msg, payloadBuf, payloadLen);
               msg[payloadLen] = '\0';
               LOG_INFO("ZmodemModule received command: '%s' from 0x%x", msg, packet.from);
 
-              // Handle the command
               handleCommand(msg, packet.from);
-              delete[] msg;
-
-              return true; // Packet was processed by this module
+              return true;
            } else {
              LOG_DEBUG("ZmodemModule ignoring non-text packet on COMMAND PortNum %d", AKZ_ZMODEM_COMMAND_PORTNUM);
              return false; // Let other modules or default handling take it
@@ -106,8 +104,7 @@ bool ZmodemModule::handleReceived(MeshPacket& packet) {
     } else if (packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {
         // This is a data packet, feed it to the library's stream processor
         // Both sender and receiver consume protocol bytes on the data port.
-        AkitaMeshZmodem::TransferState state = akitaZmodem.getCurrentState();
-        if (state == AkitaMeshZmodem::TransferState::RECEIVING || state == AkitaMeshZmodem::TransferState::SENDING) {
+        if (akitaZmodem.isBusy()) {
             LOG_DEBUG("ZmodemModule pushing DATA packet to library.");
             akitaZmodem.processDataPacket(packet);
             return true; // We consumed this packet
@@ -130,7 +127,25 @@ void ZmodemModule::handleCommand(const char* msg, NodeNum fromNodeId) {
 
     const char* args = nullptr;
     bool isSend = false;
-    if (strncmp(msg, "SEND:", 5) == 0) {
+    if (strncmp(msg, "ABORT", 5) == 0) {
+        if (akitaZmodem.isBusy()) {
+            akitaZmodem.abortTransfer();
+            sendReply("OK: Transfer aborted", fromNodeId);
+        } else {
+            akitaZmodem.reset();
+            sendReply("OK: No active transfer", fromNodeId);
+        }
+        return;
+    } else if (strncmp(msg, "STATUS", 6) == 0) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "State: %d bytes: %lu / %lu file: %s",
+                 (int)akitaZmodem.getCurrentState(),
+                 (unsigned long)akitaZmodem.getBytesTransferred(),
+                 (unsigned long)akitaZmodem.getTotalFileSize(),
+                 akitaZmodem.getFilename().c_str());
+        sendReply(buf, fromNodeId);
+        return;
+    } else if (strncmp(msg, "SEND:", 5) == 0) {
         isSend = true;
         args = msg + 5; // after SEND:
     } else if (strncmp(msg, "RECV:", 5) == 0) {
@@ -145,7 +160,7 @@ void ZmodemModule::handleCommand(const char* msg, NodeNum fromNodeId) {
     }
 
     // Check if a transfer is already active
-    if (akitaZmodem.getCurrentState() != AkitaMeshZmodem::TransferState::IDLE) {
+    if (akitaZmodem.isBusy()) {
         LOG_WARNING("ZmodemModule: Ignoring command '%s', transfer already in progress.", msg);
         char buf[128];
         snprintf(buf, sizeof(buf), "Error: Transfer already in progress (State: %d)", (int)akitaZmodem.getCurrentState());

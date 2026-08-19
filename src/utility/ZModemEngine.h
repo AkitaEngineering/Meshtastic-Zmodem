@@ -47,6 +47,7 @@ class ZModemEngine {
 public:
     enum State {
         STATE_IDLE,
+        STATE_RECEIVING,
         STATE_SEND_ZRQINIT,
         STATE_AWAIT_ZRINIT,
         STATE_SEND_ZFILE,
@@ -143,10 +144,16 @@ private:
     bool _dataSubpacketEscape;
     bool _dataSubpacketAwaitingCRC;
     uint8_t _dataSubpacketFrameEnd;
+    size_t _dataExpectedPos;
     // Internal input buffer to avoid destructive reads on Stream
     uint8_t _inBuf[512];
     size_t _inBufLen;
     void _fillInput();
+    bool _readEscapedByte(size_t& idx, uint8_t& out);
+    void _writeZdle(uint8_t value);
+    bool _inputContainsAbort() const;
+    void _logStateIfChanged();
+    State _loggedState;
     // Optional debug stream for logging
     Stream* _debug = nullptr;
     // XMODEM compatibility shim
@@ -181,7 +188,6 @@ private:
     void _sendDataSubpacket(const uint8_t* data, size_t len, bool endFrame);
     
     // Input Handling
-    void _processInput();
     int _readHexHeader(uint8_t& type, uint8_t* flags);
     int _readHeader(uint8_t& type, uint8_t* flags);
     

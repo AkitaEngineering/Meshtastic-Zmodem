@@ -5,7 +5,13 @@
  */
 
 #include <Arduino.h>
+#include <SPIFFS.h>
 #include "AkitaMeshZmodem.h"
+
+// Provided by Meshtastic firmware when the module is copied into a firmware
+// tree. Defined here so the standalone PlatformIO build can link ZmodemModule.
+FS& Filesystem = SPIFFS;
+Stream& Log = Serial;
 
 void setup() {
     // Library is initialized by calling akitaZmodem.begin() — see examples/

@@ -56,6 +56,7 @@ class ReceivedPacket : public MeshPacket {};
 class Meshtastic {
 public:
     uint8_t hopLimit = 3;
+    NodeNum nodeNum = 1;
     std::vector<MeshPacket> sentPackets;
 
     bool sendPacket(MeshPacket* packet)
@@ -64,8 +65,16 @@ public:
             return false;
         }
 
+        if (packet->from == 0) {
+            packet->from = nodeNum;
+        }
         sentPackets.push_back(*packet);
         return true;
+    }
+
+    NodeNum getNodeNum() const
+    {
+        return nodeNum;
     }
 
     uint8_t getHopLimit() const

@@ -160,6 +160,148 @@ bool testDefaultPacketBudgetMatchesMeshtasticPayload()
                   "default packet budget should match the Meshtastic decoded payload limit");
 }
 
+void forwardPackets(Meshtastic& fromMesh, AkitaMeshZmodem& toTransfer, int dropSequence = -1)
+{
+    for (MeshPacket packet : fromMesh.sentPackets) {
+        if (dropSequence >= 0 && packet.decoded.payload.length() >= 3) {
+            const uint8_t* payload = packet.decoded.payload.getBuffer();
+            const uint16_t sequence = static_cast<uint16_t>((payload[1] << 8) | payload[2]);
+            if (sequence == static_cast<uint16_t>(dropSequence)) {
+                continue;
+            }
+        }
+        toTransfer.processDataPacket(packet);
+    }
+    fromMesh.clearSentPackets();
+}
+
+bool pumpUntilComplete(AkitaMeshZmodem& sender, Meshtastic& senderMesh,
+                       AkitaMeshZmodem& receiver, Meshtastic& receiverMesh,
+                       int dropSequence = -1)
+{
+    int complete = 0;
+    for (int i = 0; i < 2000 && complete != 3; ++i) {
+        advanceMillis(25);
+        const auto senderState = sender.loop();
+        const auto receiverState = receiver.loop();
+        forwardPackets(senderMesh, receiver, dropSequence);
+        forwardPackets(receiverMesh, sender);
+        if (senderState == AkitaMeshZmodem::TransferState::ERROR ||
+            receiverState == AkitaMeshZmodem::TransferState::ERROR) {
+            return false;
+        }
+        if (senderState == AkitaMeshZmodem::TransferState::COMPLETE) complete |= 1;
+        if (receiverState == AkitaMeshZmodem::TransferState::COMPLETE) complete |= 2;
+    }
+    return complete == 3;
+}
+
+bool testMeshTransferAndRestart()
+{
+    fakeMillis = 0;
+    FS senderFs;
+    FS receiverFs;
+    std::vector<uint8_t> payload(400);
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>(i * 9 + 1);
+    }
+    senderFs.setFileData("/tx.bin", payload);
+
+    Meshtastic senderMesh;
+    Meshtastic receiverMesh;
+    senderMesh.nodeNum = 0xA1;
+    receiverMesh.nodeNum = 0xB2;
+
+    AkitaMeshZmodem sender;
+    AkitaMeshZmodem receiver;
+    sender.begin(senderMesh, senderFs, nullptr);
+    receiver.begin(receiverMesh, receiverFs, nullptr);
+
+    if (!expect(receiver.startReceive("/rx.bin"), "receiver should start") ||
+        !expect(sender.startSend("/tx.bin", receiverMesh.nodeNum), "sender should start")) {
+        return false;
+    }
+    if (!expect(receiver.getCurrentState() == AkitaMeshZmodem::TransferState::RECEIVING,
+                "startReceive should report RECEIVING")) {
+        return false;
+    }
+
+    advanceMillis(50);
+    receiver.loop();
+    if (!expect(receiver.getCurrentState() == AkitaMeshZmodem::TransferState::RECEIVING,
+                "receiver must not flip to SENDING after loop()")) {
+        return false;
+    }
+
+    if (!expect(pumpUntilComplete(sender, senderMesh, receiver, receiverMesh),
+                "mesh transfer should complete")) {
+        return false;
+    }
+    if (!expect(receiverFs.getFileData("/rx.bin") == payload, "received mesh file should match")) {
+        return false;
+    }
+
+    if (!expect(receiver.startReceive("/rx2.bin"), "receiver should restart after COMPLETE") ||
+        !expect(sender.startSend("/tx.bin", receiverMesh.nodeNum), "sender should restart after COMPLETE")) {
+        return false;
+    }
+    if (!expect(pumpUntilComplete(sender, senderMesh, receiver, receiverMesh),
+                "second mesh transfer should complete")) {
+        return false;
+    }
+    return expect(receiverFs.getFileData("/rx2.bin") == payload, "second received file should match");
+}
+
+bool testSequenceGapDoesNotStallTransfer()
+{
+    fakeMillis = 0;
+    FS senderFs;
+    FS receiverFs;
+    std::vector<uint8_t> payload(180, 0x3C);
+    senderFs.setFileData("/gap.bin", payload);
+
+    Meshtastic senderMesh;
+    Meshtastic receiverMesh;
+    senderMesh.nodeNum = 0x11;
+    receiverMesh.nodeNum = 0x22;
+
+    AkitaMeshZmodem sender;
+    AkitaMeshZmodem receiver;
+    sender.begin(senderMesh, senderFs, nullptr);
+    receiver.begin(receiverMesh, receiverFs, nullptr);
+
+    if (!expect(receiver.startReceive("/gap-rx.bin"), "gap receiver should start") ||
+        !expect(sender.startSend("/gap.bin", receiverMesh.nodeNum), "gap sender should start")) {
+        return false;
+    }
+    if (!expect(pumpUntilComplete(sender, senderMesh, receiver, receiverMesh, 1),
+                "transfer should recover when mesh sequence 1 is dropped")) {
+        return false;
+    }
+    return expect(receiverFs.getFileData("/gap-rx.bin") == payload, "file should survive a dropped mesh packet");
+}
+
+bool testPathAndDestinationValidation()
+{
+    fakeMillis = 0;
+    FS fs;
+    std::vector<uint8_t> payload = {1, 2, 3};
+    fs.setFileData("/ok.bin", payload);
+    Meshtastic mesh;
+    AkitaMeshZmodem transfer;
+    transfer.begin(mesh, fs, nullptr);
+
+    return expect(!transfer.startSend("ok.bin", 0x42u), "relative send path should be rejected") &&
+           expect(!transfer.startSend("/../ok.bin", 0x42u), "parent-directory send path should be rejected") &&
+           expect(!transfer.startSend("/ok.bin", 0), "node 0 should be rejected") &&
+           expect(!transfer.startSend("/ok.bin", 0xFFFFFFFFu), "broadcast destination should be rejected") &&
+           expect(!transfer.startReceive("rx.bin"), "relative receive path should be rejected") &&
+           expect(!transfer.startReceive("/../rx.bin"), "parent-directory receive path should be rejected") &&
+           expect(transfer.startReceive("/rx.bin"), "absolute receive path should be accepted") &&
+           expect(!transfer.startReceive("/rx2.bin"), "second receive while busy should be rejected") &&
+           expect(transfer.isBusy(), "active receive should report busy");
+}
+
 } // namespace
 
 unsigned long millis()
@@ -172,8 +314,11 @@ int main()
     const bool receiverOk = testReceiverLearnsSenderAndFlushesBufferedZrinit();
     const bool senderOk = testSenderUsesOpaqueMeshtasticPackets();
     const bool budgetOk = testDefaultPacketBudgetMatchesMeshtasticPayload();
+    const bool meshOk = testMeshTransferAndRestart();
+    const bool gapOk = testSequenceGapDoesNotStallTransfer();
+    const bool validationOk = testPathAndDestinationValidation();
 
-    if (!receiverOk || !senderOk || !budgetOk) {
+    if (!receiverOk || !senderOk || !budgetOk || !meshOk || !gapOk || !validationOk) {
         return 1;
     }
 

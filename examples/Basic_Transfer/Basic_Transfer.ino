@@ -72,6 +72,8 @@ void setup() {
     Serial.println("\n--- Commands (send via Meshtastic text message) ---");
     Serial.println("  SEND:!NodeID:/<filename>  (e.g., SEND:!a1b2c3d4:/test_transfer.txt)");
     Serial.println("  RECV:/<filename>          (e.g., RECV:/received_file.txt)");
+    Serial.println("  ABORT                     (cancel an active transfer)");
+    Serial.println("  STATUS                    (print transfer state)");
     Serial.println("----------------------------------------------------");
 }
 
@@ -105,9 +107,13 @@ void loop() {
                 break;
             case AkitaMeshZmodem::TransferState::COMPLETE:
                 Serial.println("[ZModem Status: COMPLETE]");
+                akitaZmodem.reset();
+                currentState = AkitaMeshZmodem::TransferState::IDLE;
                 break;
             case AkitaMeshZmodem::TransferState::ERROR:
                 Serial.println("[ZModem Status: ERROR]");
+                akitaZmodem.reset();
+                currentState = AkitaMeshZmodem::TransferState::IDLE;
                 break;
         }
         lastReportedState = currentState; // Update last reported state
@@ -125,8 +131,8 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         size_t payloadLen = packet.decoded.payload.length();
         const uint8_t* payloadBuf = packet.decoded.payload.getBuffer();
         if (!payloadBuf || payloadLen == 0) return;
-        char* msg = (char*)malloc(payloadLen + 1);
-        if (!msg) return;
+        char msg[256];
+        if (payloadLen >= sizeof(msg)) payloadLen = sizeof(msg) - 1;
         memcpy(msg, payloadBuf, payloadLen);
         msg[payloadLen] = '\0';
 
@@ -137,7 +143,21 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
 
         const char* args = NULL;
         bool isSend = false;
-        if (strncmp(msg, "SEND:", 5) == 0) {
+        if (strncmp(msg, "ABORT", 5) == 0) {
+            if (akitaZmodem.isBusy()) {
+                akitaZmodem.abortTransfer();
+                Serial.println("Transfer aborted.");
+            } else {
+                akitaZmodem.reset();
+                Serial.println("No active transfer.");
+            }
+            return;
+        } else if (strncmp(msg, "STATUS", 6) == 0) {
+            Serial.print("State: "); Serial.print((int)akitaZmodem.getCurrentState());
+            Serial.print(" bytes: "); Serial.print(akitaZmodem.getBytesTransferred());
+            Serial.print(" / "); Serial.println(akitaZmodem.getTotalFileSize());
+            return;
+        } else if (strncmp(msg, "SEND:", 5) == 0) {
             isSend = true;
             args = msg + 5;
         } else if (strncmp(msg, "RECV:", 5) == 0) {
@@ -145,15 +165,12 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
             args = msg + 5;
         } else {
             Serial.println("(Not a ZModem command)");
-            free(msg);
-            return; // Ignore
+            return;
         }
 
-        // Check if a transfer is already active
-        if (akitaZmodem.getCurrentState() != AkitaMeshZmodem::TransferState::IDLE) {
+        if (akitaZmodem.isBusy()) {
             Serial.println("Ignoring command: Transfer already in progress.");
             Serial.print("Current state: "); Serial.println((int)akitaZmodem.getCurrentState());
-            free(msg);
             return;
         }
         
@@ -162,7 +179,6 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
             const char* filename = args;
             if (!filename || filename[0] == '\0' || filename[0] != '/') {
                 Serial.println("Invalid RECV format: Filename must be an absolute path (start with '/').");
-                free(msg);
                 return;
             }
 
@@ -174,24 +190,20 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
             } else {
                  Serial.println("-> Receive operation started. Waiting for sender...");
             }
-            free(msg);
             return;
         }
-        
-        // --- Handle SEND Command ---
+
         // --- Handle SEND Command ---
         // Format: SEND:!NodeID:/path/file.txt
         const char* colon = strchr(args, ':');
         if (!colon || colon == args) {
             Serial.println("Invalid SEND format. Use SEND:!NodeID:/path/file.txt");
-            free(msg);
             return;
         }
 
         size_t nodeIdLen = (size_t)(colon - args);
         if (nodeIdLen == 0 || nodeIdLen >= 32) {
             Serial.println("Invalid SEND format: NodeID length invalid");
-            free(msg);
             return;
         }
 
@@ -202,7 +214,6 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
 
         if (!filename || filename[0] == '\0' || filename[0] != '/') {
             Serial.println("Invalid SEND format: Filename must be an absolute path (start with '/').");
-            free(msg);
             return;
         }
 
@@ -210,7 +221,6 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         NodeNum destNodeId = parseNodeId(nodeBuf);
         if (destNodeId == 0 || destNodeId == BROADCAST_ADDR) {
             Serial.print("Invalid SEND format: Invalid destination NodeID: "); Serial.println(nodeBuf);
-            free(msg);
             return;
         }
 
@@ -222,15 +232,13 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
         } else {
              Serial.println("-> Send operation started successfully.");
         }
-        free(msg);
         return;
 
     // 2. Check for DATA (on the dedicated data port)
     } else if (packet.isValid && packet.decoded.portnum == AKZ_ZMODEM_DATA_PORTNUM) {
         
         // This is a data packet, feed it to the library
-        AkitaMeshZmodem::TransferState state = akitaZmodem.getCurrentState();
-        if (state == AkitaMeshZmodem::TransferState::RECEIVING || state == AkitaMeshZmodem::TransferState::SENDING) {
+        if (akitaZmodem.isBusy()) {
             Serial.print("."); // Indicate data packet received
             akitaZmodem.processDataPacket(packet);
         } else {
@@ -243,7 +251,6 @@ void onMeshtasticReceived(ReceivedPacket& packet) {
 // --- Helper Function to Create Test Files ---
 void createTestFiles() {
     Serial.println("Creating test files on SPIFFS...");
-    // ... (rest of the function is unchanged, omitted for brevity) ...
     // --- Text File ---
     Serial.print("Creating "); Serial.print(TEST_FILENAME_TXT); Serial.print("... ");
     File fileTxt = SPIFFS.open(TEST_FILENAME_TXT, FILE_WRITE);

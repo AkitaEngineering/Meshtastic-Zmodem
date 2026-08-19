@@ -1,6 +1,6 @@
 # Akita Meshtastic ZModem
 
-Version: 1.1.0
+Version: 1.1.1
 
 Adds reliable, targeted node-to-node file transfers to Meshtastic LoRa networks.
 
@@ -25,20 +25,18 @@ License: GNU GPLv3 — see `LICENSE`.
 * **Hardware:** Meshtastic-compatible devices (**ESP32-based recommended**) with sufficient flash memory for the firmware and a filesystem (SPIFFS/LittleFS) to store files.
 * **Required Arduino Libraries (Minimal):**
     * `Meshtastic` (Official Meshtastic device library/firmware source)
-    * `StreamUtils` (A common utility library, included in PlatformIO/Arduino)
     * `FS` (Part of the ESP32 core)
 
 ## Installation
 
 ### Option 1: Using the Library in a Custom Sketch
 
-1.  **Install Dependencies:** Ensure `Meshtastic` and `StreamUtils` are installed via the Arduino Library Manager or PlatformIO.
+1.  **Install Dependencies:** Ensure `Meshtastic` is installed via the Arduino Library Manager or PlatformIO.
 2.  **Install AkitaMeshZmodem Library:**
     * **PlatformIO (Recommended):** Add the library directly to your `platformio.ini` dependencies:
         ```ini
         lib_deps =
             meshtastic/Meshtastic
-            bblanchon/ArduinoStreamUtils
             https://github.com/AkitaEngineering/Meshtastic-Zmodem.git
         ```
     * **Arduino IDE:** Download this repository as a ZIP and install it via the Arduino IDE's `Sketch` -> `Include Library` -> `Add .ZIP Library...` option.
@@ -92,6 +90,8 @@ Control is handled by sending specific text commands to the device on the **Comm
 | :--- | :--- | :--- |
 | **Start Send** | `SEND:!NodeID:/local/file.bin` | `meshtastic --sendtext "SEND:!a1b2c3d4:/test.txt" --portnum 250` |
 | **Start Receive**| `RECV:/save/path.bin` | `meshtastic --sendtext "RECV:/received.bin" --portnum 250` |
+| **Abort** | `ABORT` | `meshtastic --sendtext "ABORT" --portnum 250` |
+| **Status** | `STATUS` | `meshtastic --sendtext "STATUS" --portnum 250` |
 
 ### API Reference (Library Integration)
 
@@ -100,6 +100,8 @@ When integrating into custom code:
 * `begin(mesh, Filesystem, &Serial)`: Initialize the engine and set up the transport streams.
 * `loop()`: Must be called continuously in your main loop to process the ZModem state machine.
 * `processDataPacket(MeshPacket& packet)`: **CRITICAL.** Forward every packet received on the **Data Port** (`AKZ_ZMODEM_DATA_PORTNUM`) while a transfer is active. The sender needs control responses on this port just as much as the receiver needs file data.
+* `reset()`: Return to IDLE after COMPLETE/ERROR so another transfer can start. `startSend()` / `startReceive()` also do this automatically when no transfer is busy.
+* `abortTransfer()` / command `ABORT`: Cancel an active transfer and return to IDLE.
 
 
 ## Additional tools and testing
@@ -120,10 +122,11 @@ driven by `SEND:` and `RECV:` commands over the command and data ports.
 ### Building without Meshtastic
 
 The PlatformIO project has been configured to allow the code to compile with
-only stubbed versions of the Meshtastic and StreamUtils libraries (see
-`lib/…`); this makes it possible to verify the ZModem engine builds even
-when the real dependencies are not available.  To perform a full build the
-real Meshtastic package from the Arduino registry is required.
+only a stubbed Meshtastic API (see `lib/…`); this makes it possible to verify
+the ZModem engine builds even when the real firmware is not available. Native
+protocol and transport tests live in `tests/native/` and can be run with
+`tests/native/run.sh`. To perform a full on-device build the real Meshtastic
+package from the Arduino registry is required.
 
 ## Documentation updates (recent)
 

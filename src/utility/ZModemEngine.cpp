@@ -24,6 +24,12 @@ ZModemEngine::ZModemEngine() {
     _bytesTransferred = 0;
     _fileSize = 0;
     _isSender = false;
+    _filename[0] = '\0';
+    _inBufLen = 0;
+    _retryCount = 0;
+    _timeoutMs = 0;
+    _operationStartTime = 0;
+    _lastActivity = 0;
 
     // File-info parsing state
     _fileInfoIndex = 0;
@@ -34,6 +40,8 @@ ZModemEngine::ZModemEngine() {
     _dataSubpacketEscape = false;
     _dataSubpacketAwaitingCRC = false;
     _dataSubpacketFrameEnd = 0;
+    _dataExpectedPos = 0;
+    _loggedState = STATE_IDLE;
 
     // Sender/receiver timing (instance vars instead of function-local statics)
     _senderLastSend = 0;
@@ -75,6 +83,8 @@ void ZModemEngine::reset()
     _dataSubpacketEscape = false;
     _dataSubpacketAwaitingCRC = false;
     _dataSubpacketFrameEnd = 0;
+    _dataExpectedPos = 0;
+    _loggedState = STATE_IDLE;
 
     _senderLastSend = 0;
     _receiverLastAck = 0;
@@ -146,6 +156,7 @@ bool ZModemEngine::send(unsigned long timeout) {
     _dataSubpacketEscape = false;
     _dataSubpacketAwaitingCRC = false;
     _dataSubpacketFrameEnd = 0;
+    _dataExpectedPos = 0;
     _xmodemStarted = false;
     _xmodemRetryCount = 0;
     _xmodemRetryInterval = 0;
@@ -158,6 +169,7 @@ bool ZModemEngine::send(unsigned long timeout) {
     _xmodemLastPending = false;
     _lastDataPending = false;
     _lastDataEndFrame = false;
+    _loggedState = _state;
     if (_debug) {
         _debug->print("ZModemEngine: send() started\n");
     }
@@ -167,7 +179,7 @@ bool ZModemEngine::send(unsigned long timeout) {
 bool ZModemEngine::receive(unsigned long timeout) {
     if (!_io) return false;
     _isSender = false;
-    _state = STATE_AWAIT_ZRINIT; // Generic start state
+    _state = STATE_RECEIVING;
     _rState = RSTATE_AWAIT_HEADER;
     _timeoutMs = timeout;
     _operationStartTime = millis();
@@ -181,6 +193,7 @@ bool ZModemEngine::receive(unsigned long timeout) {
     _dataSubpacketEscape = false;
     _dataSubpacketAwaitingCRC = false;
     _dataSubpacketFrameEnd = 0;
+    _dataExpectedPos = 0;
     _xmodemStarted = false;
     _xmodemRetryCount = 0;
     _xmodemRetryInterval = 0;
@@ -190,6 +203,8 @@ bool ZModemEngine::receive(unsigned long timeout) {
     _lastDataPending = false;
     _lastDataEndFrame = false;
     
+    _loggedState = _state;
+
     // Receiver sends ZRINIT to start
     _sendHexHeader(ZRINIT, ZERO_FLAGS); 
     if (_debug) {
@@ -235,12 +250,7 @@ int ZModemEngine::loop() {
     } else {
         _handleReceiverLoop();
     }
-    if (_debug) {
-        // Log non-fatal state transitions for visibility
-        _debug->print("ZModemEngine: loop tick, state=");
-        _debug->print((int)_state);
-        _debug->print("\n");
-    }
+    _logStateIfChanged();
     return (_state == STATE_COMPLETE) ? 1 : (_state == STATE_ERROR ? -1 : 0);
 }
 
@@ -253,9 +263,16 @@ void ZModemEngine::_handleSenderLoop() {
     }
     uint8_t rxType;
     uint8_t rxFlags[4];
+
+    _fillInput();
+    if (_inputContainsAbort()) {
+        _state = STATE_ERROR;
+        if (_debug) _debug->print("ZModemEngine: abort sequence received\n");
+        return;
+    }
     
     // Check for incoming ACKs/NAKs
-    if (_io->available()) {
+    if (_io->available() || _inBufLen > 0) {
         int res = _readHexHeader(rxType, rxFlags);
         if (res == 1) {
             _lastActivity = millis();
@@ -323,6 +340,7 @@ void ZModemEngine::_handleSenderLoop() {
                     if (rxType == ZFIN) {
                         // Two O's usually sent here
                         _io->print("OO");
+                        _io->flush();
                         _state = STATE_COMPLETE;
                     }
                     break;
@@ -468,7 +486,15 @@ void ZModemEngine::_handleReceiverLoop() {
         return;
     }
 
-    if ((_rState == RSTATE_AWAIT_HEADER || _rState == RSTATE_AWAIT_ZDATA) && _io->available()) {
+    _fillInput();
+    if (_inputContainsAbort()) {
+        _state = STATE_ERROR;
+        _rState = RSTATE_ERROR;
+        if (_debug) _debug->print("ZModemEngine: abort sequence received\n");
+        return;
+    }
+
+    if ((_rState == RSTATE_AWAIT_HEADER || _rState == RSTATE_AWAIT_ZDATA) && _inBufLen > 0) {
         int res = _readHeader(rxType, rxFlags);
 
         if (res == 1) {
@@ -484,6 +510,10 @@ void ZModemEngine::_handleReceiverLoop() {
                 _fileInfoFrameEnd = 0;
                 _rState = RSTATE_READ_ZFILE;
             } else if (rxType == ZDATA) {
+                _dataExpectedPos = (size_t)rxFlags[0]
+                    | ((size_t)rxFlags[1] << 8)
+                    | ((size_t)rxFlags[2] << 16)
+                    | ((size_t)rxFlags[3] << 24);
                 _dataSubpacketLen = 0;
                 _dataSubpacketEscape = false;
                 _dataSubpacketAwaitingCRC = false;
@@ -497,6 +527,10 @@ void ZModemEngine::_handleReceiverLoop() {
                 _state = STATE_COMPLETE;
                 _rState = RSTATE_COMPLETE;
                 return;
+            } else if (rxType == ZCAN || rxType == ZABORT) {
+                _state = STATE_ERROR;
+                _rState = RSTATE_ERROR;
+                return;
             }
         }
     }
@@ -507,9 +541,28 @@ void ZModemEngine::_handleReceiverLoop() {
         size_t idx = 0;
         while (idx < _inBufLen) {
             if (_fileInfoAwaitingCRC) {
-                if (_inBufLen - idx < 2) break;
+                uint8_t crcHigh;
+                uint8_t crcLow;
+                size_t crcIdx = idx;
+                if (!_readEscapedByte(crcIdx, crcHigh) || !_readEscapedByte(crcIdx, crcLow)) break;
 
-                idx += 2;
+                uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
+                uint16_t crc = 0;
+                for (size_t j = 0; j < _fileInfoIndex; ++j) crc = _updcrc(_fileInfoBuffer[j], crc);
+                crc = _updcrc(_fileInfoFrameEnd, crc);
+                idx = crcIdx;
+
+                if (crc != receivedCrc) {
+                    _sendHexHeader(ZNAK, ZERO_FLAGS);
+                    _fileInfoIndex = 0;
+                    _fileInfoEscape = false;
+                    _fileInfoAwaitingCRC = false;
+                    _fileInfoFrameEnd = 0;
+                    _rState = RSTATE_AWAIT_HEADER;
+                    _lastActivity = millis();
+                    break;
+                }
+
                 size_t infoLen = (_fileInfoIndex < (sizeof(_fileInfoBuffer) - 1)) ? _fileInfoIndex : (sizeof(_fileInfoBuffer) - 1);
                 _fileInfoBuffer[infoLen] = '\0';
 
@@ -523,8 +576,13 @@ void ZModemEngine::_handleReceiverLoop() {
                 }
 
                 if (!sizeStr) {
-                    _state = STATE_ERROR;
-                    return;
+                    _sendHexHeader(ZNAK, ZERO_FLAGS);
+                    _fileInfoIndex = 0;
+                    _fileInfoEscape = false;
+                    _fileInfoAwaitingCRC = false;
+                    _fileInfoFrameEnd = 0;
+                    _rState = RSTATE_AWAIT_HEADER;
+                    break;
                 }
 
                 strncpy(_filename, filename, FILENAME_MAX_LEN - 1);
@@ -537,7 +595,8 @@ void ZModemEngine::_handleReceiverLoop() {
                 _fileInfoAwaitingCRC = false;
                 _fileInfoFrameEnd = 0;
                 _rState = RSTATE_AWAIT_ZDATA;
-                continue;
+                _lastActivity = millis();
+                break;
             }
 
             uint8_t b = _inBuf[idx++];
@@ -581,21 +640,35 @@ void ZModemEngine::_handleReceiverLoop() {
         size_t idx = 0;
         while (idx < _inBufLen) {
             if (_dataSubpacketAwaitingCRC) {
-                if (_inBufLen - idx < 2) break;
+                uint8_t crcHigh;
+                uint8_t crcLow;
+                size_t crcIdx = idx;
+                if (!_readEscapedByte(crcIdx, crcHigh) || !_readEscapedByte(crcIdx, crcLow)) break;
 
-                uint8_t crcHigh = _inBuf[idx++];
-                uint8_t crcLow = _inBuf[idx++];
                 uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
                 uint16_t crc = 0;
                 for (size_t j = 0; j < _dataSubpacketLen; ++j) crc = _updcrc(_dataSubpacketBuffer[j], crc);
                 crc = _updcrc(_dataSubpacketFrameEnd, crc);
+                idx = crcIdx;
 
                 if (crc == receivedCrc) {
-                    if (_dataSubpacketLen > 0) {
-                        _file->write(_dataSubpacketBuffer, _dataSubpacketLen);
-                        _bytesTransferred += _dataSubpacketLen;
+                    if (_dataExpectedPos > _bytesTransferred) {
+                        uint8_t pos[4];
+                        pos[0] = _bytesTransferred & 0xFF;
+                        pos[1] = (_bytesTransferred >> 8) & 0xFF;
+                        pos[2] = (_bytesTransferred >> 16) & 0xFF;
+                        pos[3] = (_bytesTransferred >> 24) & 0xFF;
+                        _sendHexHeader(ZRPOS, pos);
+                    } else if (_dataExpectedPos + _dataSubpacketLen <= _bytesTransferred) {
+                        _sendHexHeader(ZACK, ZERO_FLAGS);
+                    } else {
+                        const size_t skip = _bytesTransferred - _dataExpectedPos;
+                        if (_dataSubpacketLen > skip) {
+                            _file->write(_dataSubpacketBuffer + skip, _dataSubpacketLen - skip);
+                            _bytesTransferred += (_dataSubpacketLen - skip);
+                        }
+                        _sendHexHeader(ZACK, ZERO_FLAGS);
                     }
-                    _sendHexHeader(ZACK, ZERO_FLAGS);
                     _lastActivity = millis();
                 } else {
                     uint8_t pos[4];
@@ -612,7 +685,7 @@ void ZModemEngine::_handleReceiverLoop() {
                 _dataSubpacketAwaitingCRC = false;
                 _dataSubpacketFrameEnd = 0;
                 _rState = RSTATE_AWAIT_ZDATA;
-                continue;
+                break;
             }
 
             uint8_t b = _inBuf[idx++];
@@ -650,9 +723,11 @@ void ZModemEngine::_handleReceiverLoop() {
         }
     }
     
-    // Keepalive (If waiting for sender to act)
-    if (millis() - _receiverLastAck > 3000 && _state != STATE_COMPLETE && _state != STATE_ERROR) {
-        _sendHexHeader(ZRINIT, ZERO_FLAGS); // Keep poking sender
+    // Keepalive only while waiting for the session to start. Sending ZRINIT
+    // during ZDATA/ZEOF can make the sender skip remaining file confirmation.
+    if (_rState == RSTATE_AWAIT_HEADER && _bytesTransferred == 0 &&
+        millis() - _receiverLastAck > 3000 && _state != STATE_COMPLETE && _state != STATE_ERROR) {
+        _sendHexHeader(ZRINIT, ZERO_FLAGS);
         _receiverLastAck = millis();
     }
 
@@ -707,22 +782,28 @@ void ZModemEngine::_handleXmodemReceiver() {
         return;
     }
 
-    // Looking for SOH/ STX
-    if (c != XSOH && c != XSTX) {
-        // If we receive a SOH/STX later, handle; otherwise, consume unknown bytes minimally
-        // but avoid consuming unrelated traffic
+    // 128-byte XMODEM only. 1K (STX) would require a 1KB stack buffer on a
+    // constrained MCU, so reject it and stay on the standard 128-byte path.
+    if (c == XSTX) {
+        _io->read();
+        _io->write(XNAK);
+        _io->flush();
+        return;
+    }
+    if (c != XSOH) {
         return;
     }
 
     _xmodemStarted = true;
 
-    size_t blockSize = (c == XSOH) ? 128 : 1024;
+    const size_t blockSize = 128;
     size_t needed = 1 + 2 + blockSize + (_xmodemUseCRC ? 2 : 1);
     if ((size_t)_io->available() < needed) {
         return;
     }
 
-    int start = _io->read(); // consume SOH/STX
+    int start = _io->read(); // consume SOH
+    (void)start;
     int blk = _io->read();
     int blkComp = _io->read();
     if ((blk ^ blkComp) != 0xFF) {
@@ -731,8 +812,7 @@ void ZModemEngine::_handleXmodemReceiver() {
         return;
     }
 
-    // Read data
-    uint8_t dataBuf[1024];
+    uint8_t dataBuf[128];
     for (size_t i = 0; i < blockSize; ++i) {
         int b = _io->read(); if (b == -1) { _io->write(XNAK); return; }
         dataBuf[i] = (uint8_t)b;
@@ -951,7 +1031,7 @@ void ZModemEngine::_sendHexHeader(uint8_t type, const uint8_t* flags) {
     _io->write(ZDLE); _io->write(ZHEX);
     
     char hexBuf[12];
-    sprintf(hexBuf, "%02X%02X%02X%02X%02X", type, flags[0], flags[1], flags[2], flags[3]);
+    snprintf(hexBuf, sizeof(hexBuf), "%02X%02X%02X%02X%02X", type, flags[0], flags[1], flags[2], flags[3]);
     
     crc = _updcrc(type, crc);
     crc = _updcrc(flags[0], crc);
@@ -961,7 +1041,7 @@ void ZModemEngine::_sendHexHeader(uint8_t type, const uint8_t* flags) {
     
     _io->print(hexBuf);
     
-    sprintf(hexBuf, "%02X%02X", (crc >> 8) & 0xFF, crc & 0xFF);
+    snprintf(hexBuf, sizeof(hexBuf), "%02X%02X", (crc >> 8) & 0xFF, crc & 0xFF);
     _io->print(hexBuf);
     
     _io->write('\r'); _io->write('\n');
@@ -973,49 +1053,30 @@ void ZModemEngine::_sendBinaryHeader(uint8_t type, const uint8_t* flags) {
     uint16_t crc = 0;
     _io->write(ZPAD); _io->write(ZDLE); _io->write(ZBIN);
     
-    // ZDLE-escape helper: writes byte with escaping for control chars
-    auto zdleWrite = [&](uint8_t b) {
-        if (b == ZDLE || b == 0x10 || b == 0x11 || b == 0x13 || (b & 0x7F) == 0x0D) {
-            _io->write(ZDLE);
-            _io->write((uint8_t)(b ^ 0x40));
-        } else {
-            _io->write(b);
-        }
-    };
+    crc = _updcrc(type, crc);       _writeZdle(type);
+    crc = _updcrc(flags[0], crc);   _writeZdle(flags[0]);
+    crc = _updcrc(flags[1], crc);   _writeZdle(flags[1]);
+    crc = _updcrc(flags[2], crc);   _writeZdle(flags[2]);
+    crc = _updcrc(flags[3], crc);   _writeZdle(flags[3]);
     
-    crc = _updcrc(type, crc);       zdleWrite(type);
-    crc = _updcrc(flags[0], crc);   zdleWrite(flags[0]);
-    crc = _updcrc(flags[1], crc);   zdleWrite(flags[1]);
-    crc = _updcrc(flags[2], crc);   zdleWrite(flags[2]);
-    crc = _updcrc(flags[3], crc);   zdleWrite(flags[3]);
-    
-    zdleWrite((crc >> 8) & 0xFF);
-    zdleWrite(crc & 0xFF);
+    _writeZdle((crc >> 8) & 0xFF);
+    _writeZdle(crc & 0xFF);
 }
 
 void ZModemEngine::_sendDataSubpacket(const uint8_t* data, size_t len, bool endFrame) {
     uint16_t crc = 0;
-    for(size_t i=0; i<len; i++) {
-        // Simple escaping for ZDLE
-        // This is highly simplified and avoids complex 7E/9E escaping needed in traditional ZModem
-        // It only checks for ZDLE and common control codes
-        if (data[i] == ZDLE || data[i] == 0x10 || data[i] == 0x11 || data[i] == 0x13 || data[i] == 0x0d || data[i] == 0x8d) {
-             _io->write(ZDLE);
-             uint8_t esc = data[i] ^ 0x40;
-             _io->write(esc);
-             crc = _updcrc(data[i], crc); // CRC calculated on ORIGINAL byte
-        } else {
-             _io->write(data[i]);
-             crc = _updcrc(data[i], crc);
-        }
+    for (size_t i = 0; i < len; i++) {
+        crc = _updcrc(data[i], crc);
+        _writeZdle(data[i]);
     }
-    
+
+    const uint8_t frameEnd = endFrame ? ZCRCE : ZCRCG;
     _io->write(ZDLE);
-    _io->write(endFrame ? ZCRCE : ZCRCG); 
-    crc = _updcrc(endFrame ? ZCRCE : ZCRCG, crc);
-    
-    _io->write((crc >> 8) & 0xFF);
-    _io->write(crc & 0xFF);
+    _io->write(frameEnd);
+    crc = _updcrc(frameEnd, crc);
+
+    _writeZdle((crc >> 8) & 0xFF);
+    _writeZdle(crc & 0xFF);
     _io->flush();
 }
 
@@ -1056,45 +1117,56 @@ int ZModemEngine::_readHexHeader(uint8_t& type, uint8_t* flags) {
         _inBufLen--;
     }
 
-    // Minimum expected header length: 4 control bytes + 2(type) + 8(flags) + 4(crc) + 2(CRLF) = 20
-    const size_t MIN_HDR_LEN = 20;
-    if (_inBufLen < MIN_HDR_LEN) return 0;
+    // 4 control bytes + 14 ASCII hex chars (type, 4 flags, CRC). CRLF/XON are optional trailer.
+    const size_t HEX_CHARS = 14;
+    if (_inBufLen < 4 + HEX_CHARS) return 0;
 
-    // Ensure we have all ascii hex characters following
-    // ascii hex digits start at index 4 and span 16 bytes (2 + 8 + 4 + 2)
-    if (_inBufLen < 4 + 16) return 0;
-
-    auto hexToByte = [](uint8_t hi, uint8_t lo) -> uint8_t {
-        auto val = [](uint8_t c)->int {
-            if (c >= '0' && c <= '9') return c - '0';
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-            return -1;
-        };
-        int h = val(hi); int l = val(lo);
-        if (h < 0 || l < 0) return 0;
-        return (uint8_t)((h << 4) | l);
+    auto hexVal = [](uint8_t c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    auto parseHexByte = [&](size_t idx, uint8_t& out) -> bool {
+        int high = hexVal(_inBuf[idx]);
+        int low = hexVal(_inBuf[idx + 1]);
+        if (high < 0 || low < 0) return false;
+        out = (uint8_t)((high << 4) | low);
+        return true;
     };
 
-    // Parse type
-    type = hexToByte(_inBuf[4], _inBuf[5]);
-    // Parse 4 flags (each two hex chars)
-    for (int i = 0; i < 4; ++i) {
-        size_t idx = 6 + i * 2;
-        flags[i] = hexToByte(_inBuf[idx], _inBuf[idx+1]);
+    uint8_t parsedType;
+    uint8_t parsedFlags[4];
+    uint8_t crcHigh;
+    uint8_t crcLow;
+    if (!parseHexByte(4, parsedType) ||
+        !parseHexByte(6, parsedFlags[0]) ||
+        !parseHexByte(8, parsedFlags[1]) ||
+        !parseHexByte(10, parsedFlags[2]) ||
+        !parseHexByte(12, parsedFlags[3]) ||
+        !parseHexByte(14, crcHigh) ||
+        !parseHexByte(16, crcLow)) {
+        memmove(_inBuf, _inBuf + 1, _inBufLen - 1);
+        _inBufLen--;
+        return 0;
     }
 
-    uint16_t receivedCrc = ((uint16_t)hexToByte(_inBuf[14], _inBuf[15]) << 8) | hexToByte(_inBuf[16], _inBuf[17]);
+    uint16_t receivedCrc = ((uint16_t)crcHigh << 8) | crcLow;
     uint16_t computedCrc = 0;
-    computedCrc = _updcrc(type, computedCrc);
-    for (int i = 0; i < 4; ++i) computedCrc = _updcrc(flags[i], computedCrc);
+    computedCrc = _updcrc(parsedType, computedCrc);
+    for (int i = 0; i < 4; ++i) computedCrc = _updcrc(parsedFlags[i], computedCrc);
 
-    // We consumed 4 control bytes + 16 ascii hex chars = 20 bytes
-    size_t consumed = 4 + 16;
-    // Remove consumed bytes from buffer
+    size_t consumed = 4 + HEX_CHARS;
+    if (consumed < _inBufLen && _inBuf[consumed] == '\r') consumed++;
+    if (consumed < _inBufLen && _inBuf[consumed] == '\n') consumed++;
+    if (consumed < _inBufLen && _inBuf[consumed] == 0x11) consumed++;
+
     if (consumed < _inBufLen) memmove(_inBuf, _inBuf + consumed, _inBufLen - consumed);
     _inBufLen -= consumed;
     if (computedCrc != receivedCrc) return 0;
+
+    type = parsedType;
+    for (int i = 0; i < 4; ++i) flags[i] = parsedFlags[i];
     return 1;
 }
 
@@ -1165,11 +1237,66 @@ void ZModemEngine::_fillInput() {
     int avail = _io->available();
     if (avail <= 0) return;
     size_t space = sizeof(_inBuf) - _inBufLen;
-    if (space == 0) return;
+    if (space == 0) {
+        const size_t drop = (_inBufLen > 64) ? 64 : 1;
+        memmove(_inBuf, _inBuf + drop, _inBufLen - drop);
+        _inBufLen -= drop;
+        space = sizeof(_inBuf) - _inBufLen;
+    }
     int toRead = avail < (int)space ? avail : (int)space;
     for (int i = 0; i < toRead; ++i) {
         int c = _io->read();
         if (c == -1) break;
         _inBuf[_inBufLen++] = (uint8_t)c;
     }
+}
+
+void ZModemEngine::_writeZdle(uint8_t value) {
+    if (value == ZDLE || value == 0x10 || value == 0x11 || value == 0x13 || (value & 0x7F) == 0x0D) {
+        _io->write(ZDLE);
+        _io->write((uint8_t)(value ^ 0x40));
+    } else {
+        _io->write(value);
+    }
+}
+
+bool ZModemEngine::_readEscapedByte(size_t& idx, uint8_t& out) {
+    if (idx >= _inBufLen) return false;
+    uint8_t value = _inBuf[idx++];
+    if (value == ZDLE) {
+        if (idx >= _inBufLen) {
+            idx--;
+            return false;
+        }
+        out = (uint8_t)(_inBuf[idx++] ^ 0x40);
+        return true;
+    }
+    out = value;
+    return true;
+}
+
+bool ZModemEngine::_inputContainsAbort() const {
+    int pairs = 0;
+    int consecutiveCan = 0;
+    for (size_t i = 0; i < _inBufLen; ++i) {
+        if (_inBuf[i] == 0x18) {
+            consecutiveCan++;
+            if (consecutiveCan >= 5) return true;
+        } else {
+            consecutiveCan = 0;
+        }
+        if (i + 1 < _inBufLen && _inBuf[i] == ZDLE && _inBuf[i + 1] == ZCAN) {
+            pairs++;
+            if (pairs >= 2) return true;
+        }
+    }
+    return false;
+}
+
+void ZModemEngine::_logStateIfChanged() {
+    if (!_debug || _state == _loggedState) return;
+    _debug->print("ZModemEngine: state=");
+    _debug->print((int)_state);
+    _debug->print("\n");
+    _loggedState = _state;
 }

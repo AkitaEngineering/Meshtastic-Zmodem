@@ -12,6 +12,12 @@ This document supplements `README.md` with detailed usage examples and troublesh
   `SEND:!<NodeID>:/path/to/file`  — NodeID format: optionally prefixed with `!`, hex digits (e.g., `!a1b2c3d4`).
 - Start receive (on recipient):
   `RECV:/path/to/save`
+- Abort an active transfer:
+  `ABORT`
+- Query transfer state:
+  `STATUS`
+
+Paths must be absolute (`/file.bin`). Parent-directory components (`..`) and broadcast destinations are rejected. After COMPLETE or ERROR the next SEND/RECV starts a new transfer automatically.
 
 3) Integration checklist
 
@@ -50,8 +56,8 @@ If you're integrating into Meshtastic firmware, copy the module into the firmwar
 
 Current verification status:
 
-- The standalone PlatformIO build in this repository has been verified on `env:esp32dev`.
-- The protocol parser and data-port routing were reviewed and corrected for active send and receive paths.
+- Native engine and mesh-loopback tests in `tests/native/` cover happy-path transfers, restart after COMPLETE, unsafe-path rejection, and recovery from a dropped mesh sequence number. Run them with `tests/native/run.sh`.
+- The standalone PlatformIO build in this repository is the compile check for the ESP32 environment.
 - A real transfer between Meshtastic nodes has not been exercised in this workspace, so hardware validation is still recommended.
 
 Host-side helper prerequisites:

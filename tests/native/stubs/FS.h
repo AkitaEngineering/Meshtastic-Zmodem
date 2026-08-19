@@ -69,6 +69,7 @@ public:
     }
 
     std::size_t size() const { return (_data) ? _data->size() : 0; }
+    void flush() {}
     void close() { _position = 0; _open = false; }
     bool isDirectory() const { return false; }
     explicit operator bool() const { return _open && static_cast<bool>(_data); }
